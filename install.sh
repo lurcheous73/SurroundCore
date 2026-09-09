@@ -19,8 +19,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   cifs-utils nfs-common python3
 systemctl enable --now docker
 
-install -d -m 0755 /opt/surroundcore /var/lib/surroundcore \
-  /srv/surroundcore/media /usr/local/lib/surroundcore
+install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore
+if [ ! -d /srv/surroundcore/media ]; then
+  install -d -m 0755 /srv/surroundcore/media
+fi
 cp -a core docker-compose.yml .env.example /opt/surroundcore/
 cp endpoint/surround-agent.py /usr/local/lib/surroundcore/
 cp endpoint/surround-agent.service /etc/systemd/system/
