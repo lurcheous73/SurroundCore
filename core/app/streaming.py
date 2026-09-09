@@ -1,10 +1,15 @@
+import fcntl
+import hashlib
 import mimetypes
 import os
 import subprocess
+import tempfile
+import threading
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
 CHUNK = 1024 * 1024
+_RENDER_SEMAPHORE = threading.Semaphore(1)
 
 
 def ranged_file(path, range_header=None, filename=None):
@@ -50,31 +55,38 @@ def ranged_file(path, range_header=None, filename=None):
     return StreamingResponse(body(), status_code=206, media_type=media_type, headers=headers)
 
 
-def stereo_flac(path):
-    cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
-        '-i', path, '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '48000',
-        '-sample_fmt', 's16', '-c:a', 'flac', '-compression_level', '3',
-        '-f', 'flac', 'pipe:1',
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def _render_cache_key(path):
+    stat = os.stat(path)
+    raw = f'{os.path.realpath(path)}\0{stat.st_size}\0{stat.st_mtime_ns}'.encode()
+    return hashlib.sha256(raw).hexdigest()
 
-    def body():
-        try:
-            while True:
-                data = proc.stdout.read(256 * 1024)
-                if not data:
-                    break
-                yield data
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
+
+def stereo_flac_cache(path):
+    data_root = os.getenv('SURROUNDCORE_DATA', '/data')
+    cache_dir = os.path.join(data_root, 'render-cache', 'stereo-48k-s16-flac')
+    os.makedirs(cache_dir, exist_ok=True)
+    key = _render_cache_key(path)
+    output = os.path.join(cache_dir, key + '.flac')
+    lock_path = output + '.lock'
+    if os.path.isfile(output) and os.path.getsize(output) > 0:
+        return output
+
+    with _RENDER_SEMAPHORE:
+        with open(lock_path, 'a+b') as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if os.path.isfile(output) and os.path.getsize(output) > 0:
+                return output
+            fd, temp_path = tempfile.mkstemp(prefix=key + '.', suffix='.flac.tmp', dir=cache_dir)
+            os.close(fd)
             try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-    return StreamingResponse(body(), media_type='audio/flac', headers={
-        'Cache-Control': 'no-store',
-        'X-SurroundCore-Render': 'stereo-48k-flac',
-    })
+                subprocess.run([
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                    '-i', path, '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '48000',
+                    '-sample_fmt', 's16', '-c:a', 'flac', '-compression_level', '3',
+                    temp_path,
+                ], check=True)
+                os.replace(temp_path, output)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+    return output
