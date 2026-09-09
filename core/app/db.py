@@ -37,23 +37,29 @@ def init_db():
         con.executescript(SCHEMA)
 
 def upsert_media(item):
-    values=(item['path'], item.get('codec'), item.get('channels'), item.get('channel_layout'), item.get('sample_rate'), item.get('bit_depth'), item.get('duration'))
+    values=(item['path'], item.get('codec'), item.get('channels'), item.get('channel_layout'),
+            item.get('sample_rate'), item.get('bit_depth'), item.get('duration'),
+            json.dumps(item.get('metadata') or {}))
     with connect() as con:
-        con.execute('''INSERT INTO media(path,codec,channels,channel_layout,sample_rate,bit_depth,duration)
-        VALUES(?,?,?,?,?,?,?)
+        con.execute('''INSERT INTO media(path,codec,channels,channel_layout,sample_rate,bit_depth,duration,metadata_json)
+        VALUES(?,?,?,?,?,?,?,?)
         ON CONFLICT(path) DO UPDATE SET
           codec=excluded.codec, channels=excluded.channels,
           channel_layout=excluded.channel_layout, sample_rate=excluded.sample_rate,
-          bit_depth=excluded.bit_depth, duration=excluded.duration''', values)
+          bit_depth=excluded.bit_depth, duration=excluded.duration,
+          metadata_json=excluded.metadata_json''', values)
+
+def _media_row(row):
+    d=dict(row); d['metadata']=json.loads(d.pop('metadata_json') or '{}'); return d
 
 def list_media():
     with connect() as con:
-        return [dict(r) for r in con.execute('SELECT * FROM media ORDER BY path')]
+        return [_media_row(r) for r in con.execute('SELECT * FROM media ORDER BY path')]
 
 def get_media(media_id):
     with connect() as con:
         row=con.execute('SELECT * FROM media WHERE id=?',(media_id,)).fetchone()
-        return dict(row) if row else None
+        return _media_row(row) if row else None
 
 def upsert_endpoint(item):
     caps=json.dumps(item.get('capabilities') or {})
