@@ -7,6 +7,19 @@ AUDIO_EXT = {
     '.wma','.ape','.wv','.dsf','.dff','.mka','.mkv','.ac3','.eac3','.dts',
     '.mlp','.thd','.m2ts','.ts'
 }
+TAG_KEYS = {
+    'artist','album','album_artist','albumartist','title','track','disc','date',
+    'year','genre','composer','comment','copyright','publisher','label'
+}
+
+def clean_tags(tags):
+    out = {}
+    for key, value in (tags or {}).items():
+        k = key.lower()
+        if k in TAG_KEYS or k.startswith('musicbrainz_'):
+            if k == 'albumartist': k = 'album_artist'
+            out[k] = str(value)[:2048]
+    return out
 
 def probe(path):
     p = subprocess.run(['ffprobe','-v','error','-select_streams','a:0','-show_entries',
@@ -17,7 +30,7 @@ def probe(path):
     return Edition(path=str(path), codec=s.get('codec_name','unknown'), channels=int(s.get('channels',2)),
         channel_layout=s.get('channel_layout','unknown'), sample_rate=int(s.get('sample_rate') or 0),
         bit_depth=int(bits) if bits and str(bits).isdigit() and int(bits) > 0 else None,
-        duration=float(fmt.get('duration') or 0), metadata=fmt.get('tags') or {}).dict()
+        duration=float(fmt.get('duration') or 0), metadata=clean_tags(fmt.get('tags'))).dict()
 
 def scan(root):
     root=Path(root); out=[]
