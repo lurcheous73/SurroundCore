@@ -133,8 +133,11 @@ def stereo_flac_program_cache(paths):
 
 
 # Streaming service configuration lives on the Core, never in ControlMac.
-DATA_DIR = Path(os.getenv('SURROUNDCORE_DATA', '/data'))
-SETTINGS_PATH = DATA_DIR / 'streaming-settings.json'
+def _data_dir():
+    return Path(os.getenv('SURROUNDCORE_DATA', '/data'))
+
+def _settings_path():
+    return _data_dir() / 'streaming-settings.json'
 DEFAULT_SETTINGS = {
     'source_quality': 'highest_native',
     'prefer_lossless': True,
@@ -159,7 +162,7 @@ def airia_available():
 def load_settings():
     data = dict(DEFAULT_SETTINGS)
     try:
-        stored = json.loads(SETTINGS_PATH.read_text())
+        stored = json.loads(_settings_path().read_text())
         if isinstance(stored, dict):
             data.update(stored)
     except (OSError, ValueError, TypeError):
@@ -174,20 +177,23 @@ def save_settings(update):
     for key in DEFAULT_SETTINGS:
         if key in update:
             current[key] = update[key]
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS_PATH.with_suffix('.tmp')
+    data_dir = _data_dir()
+    path = _settings_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n')
     os.chmod(tmp, 0o600)
-    tmp.replace(SETTINGS_PATH)
+    tmp.replace(path)
     return load_settings()
 
 
-PROVIDER_SECRETS_PATH = DATA_DIR / 'provider-secrets.json'
+def _provider_secrets_path():
+    return _data_dir() / 'provider-secrets.json'
 
 
 def load_provider_secrets():
     try:
-        stored = json.loads(PROVIDER_SECRETS_PATH.read_text())
+        stored = json.loads(_provider_secrets_path().read_text())
         return stored if isinstance(stored, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
@@ -199,11 +205,13 @@ def save_provider_secret(provider_id, secret):
         secrets.pop(provider_id, None)
     else:
         secrets[provider_id] = secret
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = PROVIDER_SECRETS_PATH.with_suffix('.tmp')
+    data_dir = _data_dir()
+    path = _provider_secrets_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(secrets, indent=2, sort_keys=True) + '\n')
     os.chmod(tmp, 0o600)
-    tmp.replace(PROVIDER_SECRETS_PATH)
+    tmp.replace(path)
     return bool(secret)
 
 

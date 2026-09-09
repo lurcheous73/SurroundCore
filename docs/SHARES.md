@@ -1,5 +1,7 @@
 # Media storage
 
+> For multiple local/USB/NFS/CIFS/cloud library sources and read-through caching, see `docs/STORAGE.md`.
+
 SurroundCore reads media from `/srv/surroundcore/media` on the Debian host. Docker receives that path read-only as `/media`.
 
 ## Preferred: local NAS / Proxmox bind mount

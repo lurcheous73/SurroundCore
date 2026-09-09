@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT=${SURROUNDCORE_SOURCES_ROOT:-/srv/surroundcore/sources}
+RCLONE_CACHE=${SURROUNDCORE_RCLONE_CACHE:-/var/cache/surroundcore/rclone}
+usage(){ echo "usage: $0 {local|usb|nfs|cifs|rclone|umount|rclone-gui} ..." >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+cmd=${1:-}; shift || true
+case "$cmd" in
+  local)
+    [ $# -eq 2 ] || usage; id=$1; src=$2; dst="$ROOT/$id"; install -d "$dst"
+    mountpoint -q "$dst" || mount --bind "$src" "$dst"
+    mount -o remount,bind,ro "$dst"
+    ;;
+  usb)
+    [ $# -eq 2 ] || usage; id=$1; dev=$2; dst="$ROOT/$id"; install -d "$dst"
+    mountpoint -q "$dst" || mount -o ro "$dev" "$dst"
+    ;;
+  nfs)
+    [ $# -eq 2 ] || usage; id=$1; remote=$2; dst="$ROOT/$id"; install -d "$dst"
+    mountpoint -q "$dst" || mount -t nfs4 -o ro "$remote" "$dst"
+    ;;
+  cifs)
+    [ $# -eq 3 ] || usage; id=$1; remote=$2; creds=$3; dst="$ROOT/$id"; install -d "$dst"
+    mountpoint -q "$dst" || mount -t cifs "$remote" "$dst" -o "credentials=$creds,vers=3.1.1,ro,iocharset=utf8"
+    ;;
+  rclone)
+    [ $# -eq 2 ] || usage; id=$1; remote=$2; dst="$ROOT/$id"; install -d "$dst" "$RCLONE_CACHE/$id"
+    mountpoint -q "$dst" || rclone mount "$remote" "$dst" --read-only --allow-other --daemon \
+      --vfs-cache-mode full --cache-dir "$RCLONE_CACHE/$id"
+    ;;
+  umount)
+    [ $# -eq 1 ] || usage
+    fusermount3 -u "$ROOT/$1" 2>/dev/null || umount "$ROOT/$1"
+    ;;
+  rclone-gui)
+    exec rclone rcd --rc-web-gui --rc-addr 127.0.0.1:5572
+    ;;
+  *) usage;;
+esac

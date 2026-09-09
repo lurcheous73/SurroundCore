@@ -9,8 +9,14 @@ services:
     environment:
       SURROUNDCORE_MEDIA: /media
       SURROUNDCORE_DATA: /data
+      SURROUNDCORE_SOURCE_CACHE: /cache
+      SURROUNDCORE_CACHE_MAX_GB: ${SURROUNDCORE_CACHE_MAX_GB:-0}
+      SURROUNDCORE_CACHE_MIN_FREE_GB: ${SURROUNDCORE_CACHE_MIN_FREE_GB:-5}
+      SURROUNDCORE_PUBLIC_URL: ${SURROUNDCORE_PUBLIC_URL}
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
       SURROUNDCORE_AIRIA_DECODER: ${SURROUNDCORE_AIRIA_DECODER:-}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
+      - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:ro,rslave
+      - ${SURROUNDCORE_CACHE:-/var/cache/surroundcore}:/cache

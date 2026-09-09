@@ -16,10 +16,12 @@ fi
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   docker.io docker-compose ffmpeg alsa-utils curl ca-certificates \
-  cifs-utils nfs-common python3
+  cifs-utils nfs-common python3 rclone fuse3
 systemctl enable --now docker
+grep -q '^user_allow_other$' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
 
-install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore
+install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore \
+  /srv/surroundcore/sources /var/cache/surroundcore
 if [ ! -d /srv/surroundcore/media ]; then
   install -d -m 0755 /srv/surroundcore/media
 fi
@@ -27,6 +29,7 @@ cp -a core docker-compose.yml .env.example /opt/surroundcore/
 cp endpoint/surround-agent.py /usr/local/lib/surroundcore/
 cp endpoint/surround-agent.service /etc/systemd/system/
 chmod 0755 /usr/local/lib/surroundcore/surround-agent.py
+install -m 0755 storage/surround-storage /usr/local/sbin/surround-storage
 
 ENV=/opt/surroundcore/.env
 if [ ! -f "$ENV" ]; then
