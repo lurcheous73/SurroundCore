@@ -4,6 +4,8 @@ services:
     container_name: surroundcore
     restart: unless-stopped
     network_mode: host
+    group_add:
+      - "${SURROUNDCORE_MEDIA_GID:-1000}"
     environment:
       SURROUNDCORE_MEDIA: /media
       SURROUNDCORE_DATA: /data
