@@ -12,7 +12,7 @@ from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set
 from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
 from .media import scan
-from .streaming import ranged_file, stereo_flac_cache
+from .streaming import ranged_file, stereo_flac_cache, stereo_flac_program_cache
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
                  save_group, list_groups, get_group, delete_group, update_group_latency)
 from .groups import GroupPlayback
@@ -54,7 +54,8 @@ class GroupRequest(BaseModel):
 
 
 class GroupPlayRequest(BaseModel):
-    media_id: int
+    media_id: Optional[int] = None
+    media_ids: list[int] = Field(default_factory=list)
     position_seconds: float = 0.0
     lead_ms: int = 4000
 
@@ -151,8 +152,9 @@ def groups_play(group_id: str, item: GroupPlayRequest, authorization: str | None
         raise HTTPException(404, 'Group not found')
     session_id = 'session-' + uuid.uuid4().hex[:12]
     try:
+        media_ids = item.media_ids or ([item.media_id] if item.media_id is not None else [])
         return {'ok': True, 'session': _group_playback.play(
-            session_id, group, _all_endpoints(), item.media_id, token, item.position_seconds, item.lead_ms)}
+            session_id, group, _all_endpoints(), media_ids, token, item.position_seconds, item.lead_ms)}
     except RuntimeError as exc:
         raise HTTPException(409, str(exc))
 
@@ -261,6 +263,28 @@ def sonos_render(media_id: int, request: Request, token: str | None = Query(defa
     cached = stereo_flac_cache(item['path'])
     filename = os.path.splitext(os.path.basename(item['path']))[0] + ' - stereo.flac'
     return ranged_file(cached, request.headers.get('range'), filename)
+
+
+@app.head('/api/v1/programmes/stereo.flac')
+def programme_head(media_ids: str, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    ids = [int(x) for x in media_ids.split(',') if x.strip()]
+    items = [get_media(i) for i in ids]
+    if not ids or any(item is None for item in items):
+        raise HTTPException(404, 'Programme media not found')
+    cached = stereo_flac_program_cache([item['path'] for item in items])
+    return Response(media_type='audio/flac', headers={'Accept-Ranges':'bytes','Content-Length':str(os.path.getsize(cached))})
+
+
+@app.get('/api/v1/programmes/stereo.flac')
+def programme_stream(request: Request, media_ids: str, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    ids = [int(x) for x in media_ids.split(',') if x.strip()]
+    items = [get_media(i) for i in ids]
+    if not ids or any(item is None for item in items):
+        raise HTTPException(404, 'Programme media not found')
+    cached = stereo_flac_program_cache([item['path'] for item in items])
+    return ranged_file(cached, request.headers.get('range'), 'SurroundCore Group Programme.flac')
 
 
 @app.post('/api/v1/endpoints/{endpoint_id}/play')

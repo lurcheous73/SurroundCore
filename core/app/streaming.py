@@ -90,3 +90,40 @@ def stereo_flac_cache(path):
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
     return output
+
+
+def stereo_flac_program_cache(paths):
+    if not paths:
+        raise ValueError('Programme has no media')
+    rendered = [stereo_flac_cache(path) for path in paths]
+    key = hashlib.sha256(('\0'.join(rendered)).encode()).hexdigest()
+    data_root = os.getenv('SURROUNDCORE_DATA', '/data')
+    cache_dir = os.path.join(data_root, 'render-cache', 'programmes-48k-s16-flac')
+    os.makedirs(cache_dir, exist_ok=True)
+    output = os.path.join(cache_dir, key + '.flac')
+    if os.path.isfile(output) and os.path.getsize(output) > 0:
+        return output
+    with _RENDER_SEMAPHORE:
+        if os.path.isfile(output) and os.path.getsize(output) > 0:
+            return output
+        manifest = tempfile.NamedTemporaryFile('w', suffix='.concat', delete=False, dir=cache_dir)
+        try:
+            for item in rendered:
+                manifest.write("file '" + item.replace("'", "'\\''") + "'\n")
+            manifest.close()
+            fd, temp_path = tempfile.mkstemp(prefix=key + '.', suffix='.flac.tmp', dir=cache_dir)
+            os.close(fd)
+            try:
+                subprocess.run([
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                    '-f', 'concat', '-safe', '0', '-i', manifest.name, '-map', '0:a:0', '-vn',
+                    '-ac', '2', '-ar', '48000', '-sample_fmt', 's16', '-c:a', 'flac',
+                    '-compression_level', '3', temp_path,
+                ], check=True)
+                os.replace(temp_path, output)
+            finally:
+                if os.path.exists(temp_path): os.unlink(temp_path)
+        finally:
+            try: os.unlink(manifest.name)
+            except OSError: pass
+    return output

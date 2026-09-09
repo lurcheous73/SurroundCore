@@ -35,8 +35,9 @@ class GroupDatabaseTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    @patch('app.groups.stereo_flac_program_cache', return_value='/tmp/programme.flac')
     @patch('app.groups.get_media', return_value={'id': 1, 'path': '/tmp/x.flac'})
-    def test_higher_latency_gets_earlier_command(self, _media):
+    def test_higher_latency_gets_earlier_command(self, _media, _programme):
         engine = GroupPlayback(lambda: 'http://core', lambda *a: {})
         group = {'id': 'g', 'members': [
             {'endpoint_id': 'a', 'latency_ms': 0, 'enabled': True},
