@@ -25,14 +25,15 @@ The page stores the SurroundCore token only in browser `sessionStorage`. Control
 ## Provider status
 
 - Internet Radio: native Core provider; saved HTTP/HTTPS streams and endpoint routing are implemented.
-- Bandcamp: provider slot uses the official-account/Subsonic style integration; authentication/stream adapter still to be connected.
+- Bandcamp: Subsonic account configuration, connection test, purchased-album browsing, album detail and Core-proxied stream playback are implemented. Live Bandcamp account verification is still pending.
 - HDtracks: both purchased-library and streaming provider slots are reserved; PCM/FLAC, MQA and AIRIA capability negotiation is modelled, but partner authentication/codec modules are not bundled.
-- Spotify: intended as a native/Connect-style Core provider rather than a ControlMac decoder.
-- TIDAL and Qobuz: partner/API adapters pending.
+- Spotify: official Spotify Soloist integration is the target; Core/endpoint control adapter work is in progress and the Soloist binary must come from Spotify.
+- TIDAL: official OAuth/API metadata path is available, but playback must remain inside TIDAL's official Player SDK. Adapter pending.
+- Qobuz: Qobuz Connect receiver support requires partner integration; third-party apps cannot control Qobuz Connect directly. Adapter pending.
 - Apple Music and Audible: native-authorised handoff/provider adapters pending.
-- Podcasts/RSS: native Core provider planned.
+- Podcasts/RSS: feed registration, RSS/Atom episode discovery and endpoint playback are implemented.
 
-Provider-specific SDKs, keys and licensed codecs are not faked or embedded. A provider reports `implemented: false` until a real adapter is installed.
+Provider-specific SDKs, keys and licensed codecs are not faked or embedded. Bandcamp credentials are held in a separate mode-0600 Core secrets file and are never returned through the API.
 
 ## Core API
 
@@ -44,3 +45,14 @@ Provider-specific SDKs, keys and licensed codecs are not faked or embedded. A pr
 - `POST /api/v1/playback/url`
 - `POST /api/v1/playback/{endpoint}/stop`
 - `GET /api/v1/playback/{endpoint}/status`
+
+Provider APIs added in v0.4 development:
+
+- `GET /api/v1/providers/bandcamp`
+- `POST|DELETE /api/v1/providers/bandcamp/configure`
+- `GET /api/v1/providers/bandcamp/albums`
+- `GET /api/v1/providers/bandcamp/albums/{id}`
+- `GET /api/v1/providers/bandcamp/stream/{song_id}`
+- `POST /api/v1/providers/podcasts`
+- `DELETE /api/v1/providers/podcasts/{feed_id}`
+- `GET /api/v1/providers/podcasts/{feed_id}/episodes`

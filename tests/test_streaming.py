@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,3 +99,52 @@ class QualityRouteTests(unittest.TestCase):
 
 def tearDownModule():
     TEST_DATA.cleanup()
+
+
+class ProviderAPITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        cls.headers = {'Authorization': 'Bearer test-token'}
+
+    def tearDown(self):
+        from app.streaming import save_provider_secret
+        save_provider_secret('bandcamp', None)
+
+    def test_bandcamp_config_is_tested_and_secret_is_redacted(self):
+        with patch('app.main.bandcamp_provider.ping', return_value={'ok': True, 'version': '1.16.1'}):
+            r = self.client.post('/api/v1/providers/bandcamp/configure', headers=self.headers,
+                                 json={'username': 'fan', 'password': 'secret-value',
+                                       'server': 'https://bandcamp.com/api/subsonic'})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn('secret-value', r.text)
+        status = self.client.get('/api/v1/providers/bandcamp', headers=self.headers).json()
+        self.assertTrue(status['configured'])
+        self.assertEqual(status['username'], 'fan')
+
+    def test_podcast_feed_add_and_episode_listing(self):
+        sample = {'title': 'Test Podcast', 'url': 'https://example.invalid/feed.xml',
+                  'episodes': [{'id': 'ep1', 'title': 'Episode 1',
+                                'url': 'https://example.invalid/ep1.flac',
+                                'media_type': 'audio/flac', 'published': '', 'guid': '1'}]}
+        with patch('app.main.fetch_podcast_feed', return_value=sample):
+            r = self.client.post('/api/v1/providers/podcasts', headers=self.headers,
+                                 json={'url': sample['url'], 'name': None})
+            self.assertEqual(r.status_code, 200)
+            feed = r.json()['podcast_feeds'][-1]
+            r = self.client.get(f"/api/v1/providers/podcasts/{feed['id']}/episodes", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['episodes'][0]['id'], 'ep1')
+
+    def test_bandcamp_play_uses_core_proxy_not_provider_secret(self):
+        from app.streaming import save_provider_secret
+        save_provider_secret('bandcamp', {'server': 'https://bandcamp.com/api/subsonic',
+                                          'username': 'fan', 'password': 'do-not-leak'})
+        with patch('app.main.play_url', return_value={'ok': True}) as play:
+            r = self.client.post('/api/v1/streaming/play', headers=self.headers,
+                                 json={'provider': 'bandcamp', 'item_id': 'song-123',
+                                       'endpoint_id': 'alsa:test'})
+        self.assertEqual(r.status_code, 200)
+        url = play.call_args.args[1]
+        self.assertIn('/api/v1/providers/bandcamp/stream/song-123', url)
+        self.assertNotIn('do-not-leak', url)

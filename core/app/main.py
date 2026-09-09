@@ -6,15 +6,18 @@ import urllib.request
 import uuid
 from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import Response, HTMLResponse
+from fastapi.responses import Response, HTMLResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
 from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
 from .media import scan
 from .streaming import (ranged_file, stereo_flac_cache, stereo_flac_program_cache,
-                        load_settings, save_settings)
+                        load_settings, save_settings, load_provider_secrets, save_provider_secret)
 from .providers import provider_status, quality_policy
+from . import bandcamp as bandcamp_provider
+from .podcasts import fetch_feed as fetch_podcast_feed
 from .quality import output_route, source_request
 from .playback import play_url, stop as stop_endpoint, status as endpoint_status
 from .webui import streaming_setup_html
@@ -97,6 +100,17 @@ class ProviderPlayInput(BaseModel):
     item_id: str
     endpoint_id: str
     device: str = 'default'
+
+
+class BandcampConfigInput(BaseModel):
+    username: str
+    password: str
+    server: str = bandcamp_provider.DEFAULT_BASE
+
+
+class PodcastFeedInput(BaseModel):
+    url: str
+    name: Optional[str] = None
 
 
 @app.on_event('startup')
@@ -202,15 +216,38 @@ def delete_radio(station_id: str, authorization: str | None = Header(default=Non
 
 @app.post('/api/v1/streaming/play')
 def streaming_play(item: ProviderPlayInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
-    if item.provider != 'internet_radio':
-        raise HTTPException(501, f'{item.provider} playback module is not installed')
+    token = _require_token(authorization)
     settings = load_settings()
-    station = next((station for station in settings.get('radio_stations', []) if station.get('id') == item.item_id), None)
-    if not station:
-        raise HTTPException(404, 'Radio station not found')
+    if item.provider == 'internet_radio':
+        station = next((station for station in settings.get('radio_stations', []) if station.get('id') == item.item_id), None)
+        if not station:
+            raise HTTPException(404, 'Radio station not found')
+        url = station['url']
+    elif item.provider == 'bandcamp':
+        config = load_provider_secrets().get('bandcamp')
+        if not config:
+            raise HTTPException(409, 'Bandcamp account is not configured')
+        song_id = urllib.parse.quote(item.item_id, safe='')
+        url = f'{_public_url()}/api/v1/providers/bandcamp/stream/{song_id}?token={urllib.parse.quote(token, safe="")}'
+    elif item.provider == 'podcasts':
+        feed_id, sep, episode_id = item.item_id.partition(':')
+        if not sep:
+            raise HTTPException(400, 'Podcast item must be feed_id:episode_id')
+        feed = next((feed for feed in settings.get('podcast_feeds', []) if feed.get('id') == feed_id), None)
+        if not feed:
+            raise HTTPException(404, 'Podcast feed not found')
+        try:
+            parsed = fetch_podcast_feed(feed['url'])
+        except Exception as exc:
+            raise HTTPException(502, f'Podcast feed failed: {exc}')
+        episode = next((episode for episode in parsed['episodes'] if episode.get('id') == episode_id), None)
+        if not episode:
+            raise HTTPException(404, 'Podcast episode not found')
+        url = episode['url']
+    else:
+        raise HTTPException(501, f'{item.provider} playback module is not installed')
     try:
-        return play_url(item.endpoint_id, station['url'], item.device)
+        return play_url(item.endpoint_id, url, item.device)
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
@@ -243,6 +280,119 @@ def playback_status(endpoint_id: str, authorization: str | None = Header(default
         return endpoint_status(endpoint_id)
     except Exception as exc:
         raise HTTPException(502, str(exc))
+
+
+def _bandcamp_config():
+    config = load_provider_secrets().get('bandcamp')
+    if not config:
+        raise HTTPException(409, 'Bandcamp account is not configured')
+    return config
+
+
+@app.get('/api/v1/providers/bandcamp')
+def bandcamp_status(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    config = load_provider_secrets().get('bandcamp') or {}
+    return bandcamp_provider.redacted_config(config)
+
+
+@app.post('/api/v1/providers/bandcamp/configure')
+def bandcamp_configure(item: BandcampConfigInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    config = {'server': item.server.strip() or bandcamp_provider.DEFAULT_BASE,
+              'username': item.username.strip(), 'password': item.password}
+    try:
+        result = bandcamp_provider.ping(config)
+    except Exception as exc:
+        raise HTTPException(502, f'Bandcamp login failed: {exc}')
+    if not result.get('ok'):
+        raise HTTPException(502, 'Bandcamp Subsonic ping failed')
+    save_provider_secret('bandcamp', config)
+    return {'ok': True, 'account': bandcamp_provider.redacted_config(config), 'server_version': result.get('version')}
+
+
+@app.delete('/api/v1/providers/bandcamp/configure')
+def bandcamp_disconnect(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    save_provider_secret('bandcamp', None)
+    return {'ok': True}
+
+
+@app.get('/api/v1/providers/bandcamp/albums')
+def bandcamp_albums(size: int = Query(default=200, ge=1, le=500), offset: int = Query(default=0, ge=0), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        return {'albums': bandcamp_provider.albums(_bandcamp_config(), size=size, offset=offset)}
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get('/api/v1/providers/bandcamp/albums/{album_id}')
+def bandcamp_album(album_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        return {'album': bandcamp_provider.album(_bandcamp_config(), album_id)}
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get('/api/v1/providers/bandcamp/stream/{song_id}')
+def bandcamp_stream(song_id: str, request: Request, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    try:
+        client, response = bandcamp_provider.stream_request(_bandcamp_config(), song_id, request.headers.get('range'))
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+    headers = {key: value for key, value in response.headers.items()
+               if key.lower() in ('content-length', 'content-range', 'accept-ranges')}
+    media_type = response.headers.get('content-type', 'application/octet-stream')
+    def close_remote():
+        response.close(); client.close()
+    return StreamingResponse(response.iter_bytes(), status_code=response.status_code, media_type=media_type,
+                             headers=headers, background=BackgroundTask(close_remote))
+
+
+@app.post('/api/v1/providers/podcasts')
+def podcast_add(item: PodcastFeedInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    parsed_url = urllib.parse.urlparse(item.url)
+    if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
+        raise HTTPException(400, 'Podcast feed URL must be http or https')
+    try:
+        parsed = fetch_podcast_feed(item.url)
+    except Exception as exc:
+        raise HTTPException(502, f'Podcast feed failed: {exc}')
+    settings = load_settings()
+    feeds = list(settings.get('podcast_feeds') or [])
+    existing = next((feed for feed in feeds if feed.get('url') == item.url), None)
+    if existing:
+        existing['name'] = item.name or parsed['title']
+    else:
+        feeds.append({'id': uuid.uuid4().hex[:12], 'name': item.name or parsed['title'], 'url': item.url})
+    settings = save_settings({'podcast_feeds': feeds})
+    return {'podcast_feeds': settings['podcast_feeds']}
+
+
+@app.delete('/api/v1/providers/podcasts/{feed_id}')
+def podcast_delete(feed_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    settings = load_settings()
+    feeds = [feed for feed in settings.get('podcast_feeds', []) if feed.get('id') != feed_id]
+    settings = save_settings({'podcast_feeds': feeds})
+    return {'podcast_feeds': settings['podcast_feeds']}
+
+
+@app.get('/api/v1/providers/podcasts/{feed_id}/episodes')
+def podcast_episodes(feed_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    feed = next((feed for feed in load_settings().get('podcast_feeds', []) if feed.get('id') == feed_id), None)
+    if not feed:
+        raise HTTPException(404, 'Podcast feed not found')
+    try:
+        parsed = fetch_podcast_feed(feed['url'])
+    except Exception as exc:
+        raise HTTPException(502, f'Podcast feed failed: {exc}')
+    return {'feed': feed, 'title': parsed['title'], 'episodes': parsed['episodes']}
 
 
 @app.get('/api/v1/groups')

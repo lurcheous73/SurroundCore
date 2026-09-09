@@ -21,6 +21,8 @@ SurroundCore now owns streaming configuration and quality negotiation; ControlMa
 
 - Core-hosted setup page at `/setup/streaming`
 - Provider-neutral streaming API and saved Internet Radio stations
+- Bandcamp Subsonic account/purchased-library adapter with Core-side credential proxying
+- Native RSS/Atom podcast feed and episode playback
 - Highest-native/lossless-first source policy with downsample/downmix disabled by default
 - MQA pass-through policy for legacy/provider-supplied MQA
 - Optional licensed AIRIA helper detection (AIRIA is never claimed when no module is installed)

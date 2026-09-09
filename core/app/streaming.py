@@ -147,6 +147,7 @@ DEFAULT_SETTINGS = {
     'allow_downmix': False,
     'providers': {},
     'radio_stations': [],
+    'podcast_feeds': [],
 }
 
 
@@ -179,3 +180,32 @@ def save_settings(update):
     os.chmod(tmp, 0o600)
     tmp.replace(SETTINGS_PATH)
     return load_settings()
+
+
+PROVIDER_SECRETS_PATH = DATA_DIR / 'provider-secrets.json'
+
+
+def load_provider_secrets():
+    try:
+        stored = json.loads(PROVIDER_SECRETS_PATH.read_text())
+        return stored if isinstance(stored, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_provider_secret(provider_id, secret):
+    secrets = load_provider_secrets()
+    if secret is None:
+        secrets.pop(provider_id, None)
+    else:
+        secrets[provider_id] = secret
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PROVIDER_SECRETS_PATH.with_suffix('.tmp')
+    tmp.write_text(json.dumps(secrets, indent=2, sort_keys=True) + '\n')
+    os.chmod(tmp, 0o600)
+    tmp.replace(PROVIDER_SECRETS_PATH)
+    return bool(secret)
+
+
+def provider_secret_configured(provider_id):
+    return provider_id in load_provider_secrets()

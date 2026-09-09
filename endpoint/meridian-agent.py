@@ -198,6 +198,12 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get('Content-Length', '0'))
         data = json.loads(self.rfile.read(n) or b'{}')
         try:
+            if self.path == '/v1/play':
+                if not data.get('url'):
+                    return self.send_json({'error': 'url required'}, 400)
+                PREPARED = {'url': data['url'], 'volume': data.get('volume', DEFAULT_VOLUME),
+                            'position_seconds': float(data.get('position_seconds', 0.0))}
+                return self.send_json(start_player())
             if self.path == '/v1/prepare':
                 if not data.get('url'):
                     return self.send_json({'error': 'url required'}, 400)
