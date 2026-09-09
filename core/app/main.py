@@ -13,8 +13,11 @@ from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
 from .media import scan
 from .streaming import ranged_file, stereo_flac_cache, stereo_flac_program_cache
+from .sources import (SOURCE_KINDS, CACHE_POLICIES, validate_source, source_status,
+                      media_path, cache_file, purge_source_cache, cache_stats)
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
-                 save_group, list_groups, get_group, delete_group, update_group_latency)
+                 save_group, list_groups, get_group, delete_group, update_group_latency,
+                 save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
 
 app = FastAPI(title='SurroundCore', version='0.3.0')
@@ -64,6 +67,16 @@ class LatencyRequest(BaseModel):
     latency_ms: int
 
 
+class LibrarySourceRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    kind: str
+    path: Optional[str] = None
+    cache_policy: str = 'off'
+    config: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
 @app.on_event('startup')
 def startup():
     init_db()
@@ -97,6 +110,18 @@ def _public_url():
     return os.getenv('SURROUNDCORE_PUBLIC_URL', 'http://127.0.0.1:8080').rstrip('/')
 
 
+def _resolved_media(item):
+    if not item:
+        raise HTTPException(404, 'Media not found')
+    try:
+        path=media_path(item)
+    except OSError:
+        raise HTTPException(404, 'Media source unavailable and no cached copy exists')
+    if not os.path.isfile(path):
+        raise HTTPException(404, 'Media not found')
+    return path
+
+
 def _media_url(media_id, token, sonos=False):
     route = f'/api/v1/media/{media_id}/sonos.flac' if sonos else f'/api/v1/media/{media_id}/stream'
     return f'{_public_url()}{route}?token={urllib.parse.quote(token, safe="")}'
@@ -111,6 +136,83 @@ def _post_json(url, body, token):
 
 
 _group_playback = GroupPlayback(_public_url, _post_json)
+
+
+@app.get('/api/v1/sources')
+def sources_list(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    items=[]
+    for source in list_sources():
+        row=dict(source); row['status']=source_status(source); items.append(row)
+    return {'sources':items,'kinds':list(SOURCE_KINDS),'cache_policies':list(CACHE_POLICIES)}
+
+
+@app.post('/api/v1/sources')
+def sources_save(item: LibrarySourceRequest, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    data=item.model_dump(); data['id']=data.get('id') or ('source-' + uuid.uuid4().hex[:12])
+    try:
+        validate_source(data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    save_source(data)
+    source=get_source(data['id']); source['status']=source_status(source)
+    return {'ok':True,'source':source}
+
+
+@app.delete('/api/v1/sources/{source_id}')
+def sources_delete(source_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if not delete_source(source_id):
+        raise HTTPException(404, 'Library source not found')
+    return {'ok':True}
+
+
+@app.post('/api/v1/sources/{source_id}/scan')
+def sources_scan(source_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    source=get_source(source_id)
+    if not source:
+        raise HTTPException(404, 'Library source not found')
+    if source['kind']=='plex':
+        raise HTTPException(409, 'Plex libraries are indexed through the Plex provider')
+    root=source.get('path')
+    if not root or not os.path.isdir(root):
+        raise HTTPException(409, 'Library source is not mounted')
+    items=scan(root)
+    for entry in items:
+        if 'error' not in entry:
+            entry['source_id']=source_id; upsert_media(entry)
+    pruned=prune_source_media(source_id, [entry['path'] for entry in items if entry.get('path')])
+    return {'source_id':source_id,'root':root,'scanned':len(items),'pruned':pruned,'items':items}
+
+
+@app.post('/api/v1/sources/{source_id}/cache/warm')
+def sources_cache_warm(source_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    source=get_source(source_id)
+    if not source:
+        raise HTTPException(404, 'Library source not found')
+    if source.get('cache_policy') not in ('read-through','pin'):
+        raise HTTPException(409, 'Source cache policy does not store media files')
+    files=[m for m in list_media() if m.get('source_id')==source_id]
+    for entry in files:
+        cache_file(entry['path'], source_id)
+    return {'ok':True,'source_id':source_id,'cached':len(files)}
+
+
+@app.get('/api/v1/sources/cache/status')
+def sources_cache_status(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return cache_stats()
+
+
+@app.delete('/api/v1/sources/{source_id}/cache')
+def sources_cache_purge(source_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if not get_source(source_id):
+        raise HTTPException(404, 'Library source not found')
+    return {'ok':True,'source_id':source_id,'purged':purge_source_cache(source_id)}
 
 
 @app.get('/api/v1/groups')
@@ -226,27 +328,24 @@ def library(authorization: str | None = Header(default=None)):
 def stream_head(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
     item = get_media(media_id)
-    if not item or not os.path.isfile(item['path']):
-        raise HTTPException(404, 'Media not found')
-    return Response(headers={'Accept-Ranges': 'bytes', 'Content-Length': str(os.path.getsize(item['path']))})
+    path=_resolved_media(item)
+    return Response(headers={'Accept-Ranges': 'bytes', 'Content-Length': str(os.path.getsize(path))})
 
 
 @app.get('/api/v1/media/{media_id}/stream')
 def stream(media_id: int, request: Request, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
     item = get_media(media_id)
-    if not item or not os.path.isfile(item['path']):
-        raise HTTPException(404, 'Media not found')
-    return ranged_file(item['path'], request.headers.get('range'), os.path.basename(item['path']))
+    path=_resolved_media(item)
+    return ranged_file(path, request.headers.get('range'), os.path.basename(item['path']))
 
 
 @app.head('/api/v1/media/{media_id}/sonos.flac')
 def sonos_render_head(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
     item = get_media(media_id)
-    if not item or not os.path.isfile(item['path']):
-        raise HTTPException(404, 'Media not found')
-    cached = stereo_flac_cache(item['path'])
+    path=_resolved_media(item)
+    cached = stereo_flac_cache(path)
     return Response(media_type='audio/flac', headers={
         'Accept-Ranges': 'bytes',
         'Content-Length': str(os.path.getsize(cached)),
@@ -258,9 +357,8 @@ def sonos_render_head(media_id: int, token: str | None = Query(default=None), au
 def sonos_render(media_id: int, request: Request, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
     item = get_media(media_id)
-    if not item or not os.path.isfile(item['path']):
-        raise HTTPException(404, 'Media not found')
-    cached = stereo_flac_cache(item['path'])
+    path=_resolved_media(item)
+    cached = stereo_flac_cache(path)
     filename = os.path.splitext(os.path.basename(item['path']))[0] + ' - stereo.flac'
     return ranged_file(cached, request.headers.get('range'), filename)
 
@@ -272,7 +370,7 @@ def programme_head(media_ids: str, token: str | None = Query(default=None), auth
     items = [get_media(i) for i in ids]
     if not ids or any(item is None for item in items):
         raise HTTPException(404, 'Programme media not found')
-    cached = stereo_flac_program_cache([item['path'] for item in items])
+    cached = stereo_flac_program_cache([_resolved_media(item) for item in items])
     return Response(media_type='audio/flac', headers={'Accept-Ranges':'bytes','Content-Length':str(os.path.getsize(cached))})
 
 
@@ -283,7 +381,7 @@ def programme_stream(request: Request, media_ids: str, token: str | None = Query
     items = [get_media(i) for i in ids]
     if not ids or any(item is None for item in items):
         raise HTTPException(404, 'Programme media not found')
-    cached = stereo_flac_program_cache([item['path'] for item in items])
+    cached = stereo_flac_program_cache([_resolved_media(item) for item in items])
     return ranged_file(cached, request.headers.get('range'), 'SurroundCore Group Programme.flac')
 
 
@@ -322,7 +420,7 @@ def sonos_play(item: SonosPlayRequest, authorization: str | None = Header(defaul
     media = get_media(item.media_id)
     if not media:
         raise HTTPException(404, 'Media not found')
-    stereo_flac_cache(media['path'])
+    stereo_flac_cache(_resolved_media(media))
     volume = sonos_set_volume(zone, max(0, min(int(item.volume), 100)))
     uri = _media_url(item.media_id, token, sonos=True)
     sonos_play_uri(zone, uri)

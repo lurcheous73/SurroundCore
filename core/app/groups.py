@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 
 from .db import get_media
 from .streaming import stereo_flac_cache, stereo_flac_program_cache
+from .sources import media_path
 from .sonos import prepare_uri as sonos_prepare_uri, play as sonos_play, seek as sonos_seek, set_volume as sonos_set_volume, stop as sonos_stop
 
 
@@ -101,7 +102,11 @@ class GroupPlayback:
         media = [get_media(i) for i in media_ids]
         if not media_ids or any(item is None for item in media):
             raise RuntimeError('Media not found')
-        stereo_flac_program_cache([item['path'] for item in media])
+        try:
+            paths=[media_path(item) for item in media]
+        except OSError as exc:
+            raise RuntimeError('Media source unavailable and no cached copy exists') from exc
+        stereo_flac_program_cache(paths)
         source_url = self._programme_url(media_ids, token)
         now_ms = int(time.time() * 1000)
         target_ms = now_ms + max(1500, int(lead_ms))

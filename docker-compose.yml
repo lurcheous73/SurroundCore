@@ -9,7 +9,10 @@ services:
     environment:
       SURROUNDCORE_MEDIA: /media
       SURROUNDCORE_DATA: /data
+      SURROUNDCORE_SOURCE_CACHE: /cache
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
+      - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:ro,rslave
+      - ${SURROUNDCORE_CACHE:-/var/cache/surroundcore}:/cache
