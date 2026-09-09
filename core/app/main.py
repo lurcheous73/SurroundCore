@@ -5,6 +5,7 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
 from .media import scan
@@ -115,6 +116,15 @@ def library(authorization: str | None = Header(default=None)):
     return {'items': list_media()}
 
 
+@app.head('/api/v1/media/{media_id}/stream')
+def stream_head(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    item = get_media(media_id)
+    if not item or not os.path.isfile(item['path']):
+        raise HTTPException(404, 'Media not found')
+    return Response(headers={'Accept-Ranges': 'bytes', 'Content-Length': str(os.path.getsize(item['path']))})
+
+
 @app.get('/api/v1/media/{media_id}/stream')
 def stream(media_id: int, request: Request, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
@@ -122,6 +132,15 @@ def stream(media_id: int, request: Request, token: str | None = Query(default=No
     if not item or not os.path.isfile(item['path']):
         raise HTTPException(404, 'Media not found')
     return ranged_file(item['path'], request.headers.get('range'), os.path.basename(item['path']))
+
+
+@app.head('/api/v1/media/{media_id}/sonos.flac')
+def sonos_render_head(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    item = get_media(media_id)
+    if not item or not os.path.isfile(item['path']):
+        raise HTTPException(404, 'Media not found')
+    return Response(media_type='audio/flac', headers={'X-SurroundCore-Render': 'stereo-48k-flac'})
 
 
 @app.get('/api/v1/media/{media_id}/sonos.flac')
