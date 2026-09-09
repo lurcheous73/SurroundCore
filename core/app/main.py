@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
+from .mdns_endpoints import endpoints as mdns_endpoints
 from .media import scan
 from .streaming import ranged_file, stereo_flac
 from .db import init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints
@@ -55,11 +56,12 @@ def _require_token(authorization=None, token=None):
 
 def _all_endpoints():
     combined = {e['id']: e for e in list_endpoints()}
-    try:
-        for endpoint in sonos_endpoints():
-            combined[endpoint['id']] = endpoint
-    except Exception:
-        pass
+    for discover in (sonos_endpoints, mdns_endpoints):
+        try:
+            for endpoint in discover():
+                combined[endpoint['id']] = endpoint
+        except Exception:
+            pass
     return list(combined.values())
 
 
@@ -97,6 +99,12 @@ def register_endpoint(item: EndpointRegistration, authorization: str | None = He
 def sonos(authorization: str | None = Header(default=None)):
     _require_token(authorization)
     return {'endpoints': sonos_endpoints()}
+
+
+@app.get('/api/v1/endpoints/mdns')
+def mdns(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'endpoints': mdns_endpoints()}
 
 
 @app.post('/api/v1/library/scan')
