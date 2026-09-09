@@ -9,11 +9,12 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
 from .mdns_endpoints import endpoints as mdns_endpoints
+from .upnp import endpoints as upnp_endpoints
 from .media import scan
-from .streaming import ranged_file, stereo_flac
+from .streaming import ranged_file, stereo_flac_cache
 from .db import init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints
 
-app = FastAPI(title='SurroundCore', version='0.2.0')
+app = FastAPI(title='SurroundCore', version='0.2.1')
 
 
 class EndpointRegistration(BaseModel):
@@ -43,7 +44,7 @@ def startup():
 
 @app.get('/api/v1/health')
 def health():
-    return {'ok': True, 'service': 'SurroundCore', 'version': '0.2.0'}
+    return {'ok': True, 'service': 'SurroundCore', 'version': '0.2.1'}
 
 
 def _require_token(authorization=None, token=None):
@@ -56,7 +57,7 @@ def _require_token(authorization=None, token=None):
 
 def _all_endpoints():
     combined = {e['id']: e for e in list_endpoints()}
-    for discover in (sonos_endpoints, mdns_endpoints):
+    for discover in (sonos_endpoints, mdns_endpoints, upnp_endpoints):
         try:
             for endpoint in discover():
                 combined[endpoint['id']] = endpoint
@@ -107,6 +108,12 @@ def mdns(authorization: str | None = Header(default=None)):
     return {'endpoints': mdns_endpoints()}
 
 
+@app.get('/api/v1/endpoints/upnp')
+def upnp(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'endpoints': upnp_endpoints()}
+
+
 @app.post('/api/v1/library/scan')
 def library_scan(path: str = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization)
@@ -148,16 +155,23 @@ def sonos_render_head(media_id: int, token: str | None = Query(default=None), au
     item = get_media(media_id)
     if not item or not os.path.isfile(item['path']):
         raise HTTPException(404, 'Media not found')
-    return Response(media_type='audio/flac', headers={'X-SurroundCore-Render': 'stereo-48k-flac'})
+    cached = stereo_flac_cache(item['path'])
+    return Response(media_type='audio/flac', headers={
+        'Accept-Ranges': 'bytes',
+        'Content-Length': str(os.path.getsize(cached)),
+        'X-SurroundCore-Render': 'cached-stereo-48k-s16-flac',
+    })
 
 
 @app.get('/api/v1/media/{media_id}/sonos.flac')
-def sonos_render(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+def sonos_render(media_id: int, request: Request, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
     _require_token(authorization, token)
     item = get_media(media_id)
     if not item or not os.path.isfile(item['path']):
         raise HTTPException(404, 'Media not found')
-    return stereo_flac(item['path'])
+    cached = stereo_flac_cache(item['path'])
+    filename = os.path.splitext(os.path.basename(item['path']))[0] + ' - stereo.flac'
+    return ranged_file(cached, request.headers.get('range'), filename)
 
 
 @app.post('/api/v1/endpoints/{endpoint_id}/play')
@@ -168,7 +182,7 @@ def endpoint_play(endpoint_id: str, item: EndpointPlayRequest, authorization: st
         raise HTTPException(404, 'ALSA endpoint not found')
     if not get_media(item.media_id):
         raise HTTPException(404, 'Media not found')
-    volume = max(0.0, min(float(item.volume), 0.49))
+    volume = max(0.0, min(float(item.volume), 1.0))
     result = _post_json(endpoint['address'].rstrip('/') + '/v1/play', {
         'url': _media_url(item.media_id, token), 'device': item.device, 'volume': volume,
     }, token)
@@ -192,9 +206,11 @@ def sonos_play(item: SonosPlayRequest, authorization: str | None = Header(defaul
     zone = next((e for e in zones if item.zone_id in (e.get('id'), e.get('name'))), None) if item.zone_id else (zones[0] if zones else None)
     if not zone:
         raise HTTPException(404, 'Sonos zone not found')
-    if not get_media(item.media_id):
+    media = get_media(item.media_id)
+    if not media:
         raise HTTPException(404, 'Media not found')
-    volume = sonos_set_volume(zone, min(int(item.volume), 49))
+    stereo_flac_cache(media['path'])
+    volume = sonos_set_volume(zone, max(0, min(int(item.volume), 100)))
     uri = _media_url(item.media_id, token, sonos=True)
     sonos_play_uri(zone, uri)
     return {'ok': True, 'zone': zone.get('name'), 'volume': volume, 'uri': uri}
