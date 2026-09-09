@@ -82,7 +82,7 @@ def stereo_flac_cache(path):
                 subprocess.run([
                     'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
                     '-i', path, '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '48000',
-                    '-sample_fmt', 's16', '-c:a', 'flac', '-compression_level', '3',
+                    '-sample_fmt', 's16', '-c:a', 'flac', '-compression_level', '3', '-f', 'flac',
                     temp_path,
                 ], check=True)
                 os.replace(temp_path, output)
@@ -118,7 +118,7 @@ def stereo_flac_program_cache(paths):
                     'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
                     '-f', 'concat', '-safe', '0', '-i', manifest.name, '-map', '0:a:0', '-vn',
                     '-ac', '2', '-ar', '48000', '-sample_fmt', 's16', '-c:a', 'flac',
-                    '-compression_level', '3', temp_path,
+                    '-compression_level', '3', '-f', 'flac', temp_path,
                 ], check=True)
                 os.replace(temp_path, output)
             finally:
