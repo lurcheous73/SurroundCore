@@ -179,7 +179,7 @@ def startup():
 
 @app.get('/api/v1/health')
 def health():
-    return {'ok': True, 'service': 'SurroundCore', 'version': '0.4.0-dev'}
+    return {'ok': True, 'service': 'SurroundCore', 'version': '0.5.0-dev'}
 
 
 @app.get('/setup/streaming', response_class=HTMLResponse)
