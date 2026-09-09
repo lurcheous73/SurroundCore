@@ -1,0 +1,13 @@
+services:
+  surroundcore:
+    build: ./core
+    container_name: surroundcore
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SURROUNDCORE_MEDIA: /media
+      SURROUNDCORE_DATA: /data
+      SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
+    volumes:
+      - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
+      - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
