@@ -34,6 +34,21 @@ def local_ip():
     return ips[0] if ips else '127.0.0.1'
 
 
+def classify_output(description):
+    text = description.upper()
+    if 'HDMI' in text or 'DISPLAYPORT' in text:
+        return 'hdmi'
+    if 'S/PDIF' in text or 'SPDIF' in text or 'IEC958' in text or 'DIGITAL' in text:
+        return 'spdif'
+    if 'USB' in text:
+        return 'usb-audio'
+    if 'AES' in text or 'EBU' in text:
+        return 'aes3'
+    if 'I2S' in text or 'I2S' in text.replace('-', ''):
+        return 'i2s'
+    return 'analog'
+
+
 def capabilities():
     cards = run('aplay', '-l')
     devices = []
@@ -47,17 +62,21 @@ def capabilities():
             device = int(dev_part.split(':', 1)[0])
         except (ValueError, IndexError):
             continue
+        output_type = classify_output(line)
         devices.append({
             'alsa': f'plughw:{card},{device}',
             'raw_alsa': f'hw:{card},{device}',
             'description': line.strip(),
-            'hdmi': 'HDMI' in line.upper(),
+            'output_type': output_type,
+            'digital': output_type in ('hdmi', 'spdif', 'aes3'),
+            'multichannel_candidate': output_type in ('hdmi', 'usb-audio', 'aes3', 'i2s'),
         })
     return {
         'kind': 'alsa',
         'hostname': os.uname().nodename,
         'devices': devices,
         'default_device': DEFAULT_DEVICE,
+        'supported_output_types': ['analog', 'usb-audio', 'hdmi', 'spdif', 'aes3', 'i2s'],
         'channel_mapping': 'source-layout-preserved',
         'max_software_volume': MAX_VOLUME,
     }
