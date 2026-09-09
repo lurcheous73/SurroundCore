@@ -1,7 +1,7 @@
 import os
 import shutil
 
-from .streaming import airia_available, provider_secret_configured
+from .streaming import airia_available, provider_secret_configured, load_provider_secrets
 
 PROVIDERS = [
     {
@@ -27,8 +27,13 @@ PROVIDERS = [
     },
     {
         'id': 'spotify', 'name': 'Spotify',
-        'kind': 'soloist/connect', 'auth': 'Spotify Soloist API key + Connect pairing', 'implemented': False,
+        'kind': 'soloist/connect', 'auth': 'Spotify Soloist API key + Connect pairing', 'implemented': True,
         'quality': 'provider-highest', 'formats': ['lossless up to 24/44.1 where account supports it'],
+    },
+    {
+        'id': 'sonos_radio', 'name': 'Sonos Radio / Favorites',
+        'kind': 'sonos-control-api', 'auth': 'Sonos OAuth 2.0', 'implemented': True,
+        'quality': 'Sonos-managed source quality', 'formats': ['Sonos Radio', 'Sonos Favorites'],
     },
     {
         'id': 'tidal', 'name': 'TIDAL',
@@ -62,6 +67,7 @@ def _soloist_path():
 
 def provider_status(settings):
     states = settings.get('providers') or {}
+    secrets = load_provider_secrets()
     result = []
     for provider in PROVIDERS:
         item = dict(provider)
@@ -71,17 +77,35 @@ def provider_status(settings):
         if provider['id'] == 'bandcamp':
             item['connected'] = provider_secret_configured('bandcamp')
         elif provider['id'] == 'hdtracks':
+            item['configured'] = provider_secret_configured('hdtracks')
+            item['connected'] = False
             item['airia_available'] = airia_available()
-            item['partner_credentials'] = bool(os.getenv('SURROUNDCORE_HDTRACKS_CLIENT_ID'))
+            item['partner_credentials'] = bool(os.getenv('SURROUNDCORE_HDTRACKS_CLIENT_ID')) or item.get('configured', False)
         elif provider['id'] == 'spotify':
+            cfg = secrets.get('spotify') or {}
+            item['configured'] = bool(cfg.get('api_key'))
+            item['connected'] = False
             item['soloist_available'] = bool(_soloist_path())
             item['soloist_path'] = _soloist_path()
+        elif provider['id'] == 'sonos_radio':
+            cfg = secrets.get('sonos') or {}
+            item['configured'] = bool(cfg.get('client_id') and cfg.get('client_secret'))
+            item['connected'] = bool(cfg.get('access_token') or cfg.get('refresh_token'))
         elif provider['id'] == 'tidal':
-            item['developer_credentials'] = bool(os.getenv('SURROUNDCORE_TIDAL_CLIENT_ID'))
+            item['configured'] = provider_secret_configured('tidal')
+            item['connected'] = False
+            item['developer_credentials'] = bool(os.getenv('SURROUNDCORE_TIDAL_CLIENT_ID')) or item.get('configured', False)
         elif provider['id'] == 'qobuz':
-            item['partner_credentials'] = bool(os.getenv('SURROUNDCORE_QOBUZ_APP_ID'))
+            item['configured'] = provider_secret_configured('qobuz')
+            item['connected'] = False
+            item['partner_credentials'] = bool(os.getenv('SURROUNDCORE_QOBUZ_APP_ID')) or item.get('configured', False)
         elif provider['id'] == 'apple_music':
-            item['developer_credentials'] = bool(os.getenv('SURROUNDCORE_APPLE_MUSIC_TEAM_ID'))
+            item['configured'] = provider_secret_configured('apple_music')
+            item['connected'] = False
+            item['developer_credentials'] = bool(os.getenv('SURROUNDCORE_APPLE_MUSIC_TEAM_ID')) or item.get('configured', False)
+        elif provider['id'] == 'audible':
+            item['configured'] = provider_secret_configured('audible')
+            item['connected'] = False
         result.append(item)
     return result
 

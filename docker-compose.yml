@@ -15,11 +15,13 @@ services:
       SURROUNDCORE_PUBLIC_URL: ${SURROUNDCORE_PUBLIC_URL}
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
       SURROUNDCORE_AIRIA_DECODER: ${SURROUNDCORE_AIRIA_DECODER:-}
+      SURROUNDCORE_SPOTIFY_SOLOIST: ${SURROUNDCORE_SPOTIFY_SOLOIST:-/opt/spotify/soloist}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
       - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:ro,rslave
       - ${SURROUNDCORE_CACHE:-/var/cache/surroundcore}:/cache
+      - ${SURROUNDCORE_SPOTIFY_DIR:-/opt/surroundcore/spotify}:/opt/spotify:ro
 
   surround-ingest:
     build: ./ingest

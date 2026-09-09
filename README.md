@@ -2,7 +2,7 @@
 
 SurroundCore is a Debian 13-only multichannel music core and endpoint system intended to sit alongside Meridian/Sooloos and be controlled by modern clients such as ControlMac 2026.
 
-Current status: **v0.4 development / developer preview**. Storage, synchronized playback and the Core-hosted streaming foundation are now being developed as one system.
+Current status: **v0.5 development / developer preview**. Storage, synchronized playback, optical ingest and streaming providers are being developed as one system.
 
 ## Goals
 
@@ -27,7 +27,7 @@ SurroundCore now separates **library sources** from **playback endpoints**. The 
 
 See `docs/STORAGE.md` for the source, mount and cache model.
 
-## Streaming foundation (v0.4 development)
+## Streaming providers (v0.5 development)
 
 SurroundCore now owns streaming configuration and quality negotiation; ControlMac remains a control surface.
 
@@ -35,6 +35,9 @@ SurroundCore now owns streaming configuration and quality negotiation; ControlMa
 - Provider-neutral streaming API and saved Internet Radio stations
 - Bandcamp Subsonic account/purchased-library adapter with Core-side credential proxying
 - Native RSS/Atom podcast feed and episode playback
+- Official Spotify Soloist control surface (user-supplied binary/API key)
+- Sonos OAuth + Sonos Radio/Favorites control on Sonos groups
+- Licensed-provider bridge contract for TIDAL, Qobuz, HDtracks/AIRIA, Apple Music and Audible
 - Highest-native/lossless-first source policy with downsample/downmix disabled by default
 - MQA pass-through policy for legacy/provider-supplied MQA
 - Optional licensed AIRIA helper detection (AIRIA is never claimed when no module is installed)

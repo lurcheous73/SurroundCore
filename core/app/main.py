@@ -1,6 +1,7 @@
 import hmac
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -17,6 +18,7 @@ from .streaming import (ranged_file, stereo_flac_cache, stereo_flac_program_cach
                         load_settings, save_settings, load_provider_secrets, save_provider_secret)
 from .providers import provider_status, quality_policy
 from . import bandcamp as bandcamp_provider
+from . import spotify_soloist, sonos_cloud, provider_bridge
 from .podcasts import fetch_feed as fetch_podcast_feed
 from .quality import output_route, source_request
 from .playback import play_url, stop as stop_endpoint, status as endpoint_status
@@ -28,7 +30,7 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
                  save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
 
-app = FastAPI(title='SurroundCore', version='0.4.0-dev')
+app = FastAPI(title='SurroundCore', version='0.5.0-dev')
 
 
 class EndpointRegistration(BaseModel):
@@ -114,6 +116,51 @@ class BandcampConfigInput(BaseModel):
 class PodcastFeedInput(BaseModel):
     url: str
     name: Optional[str] = None
+
+
+class SpotifyConfigInput(BaseModel):
+    api_key: str
+    binary: str = '/opt/spotify/soloist'
+    device_name: str = 'SurroundCore Spotify'
+    ws: str = '127.0.0.1:9090'
+    data_dir: str = '/data/spotify'
+
+
+class SpotifyPlayInput(BaseModel):
+    uri: Optional[str] = None
+
+
+class SonosCloudConfigInput(BaseModel):
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+
+
+class SonosCodeInput(BaseModel):
+    code: str
+
+
+class SonosTokenInput(BaseModel):
+    access_token: str
+    refresh_token: Optional[str] = None
+    expires_in: int = 86400
+
+
+class SonosFavoritePlayInput(BaseModel):
+    group_id: str
+    favorite_id: str
+
+
+class ProviderBridgeConfigInput(BaseModel):
+    base_url: str
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    access_token: Optional[str] = None
+
+
+class ProviderBridgePlayInput(BaseModel):
+    item_id: str
+    endpoint_id: Optional[str] = None
 
 class LibrarySourceRequest(BaseModel):
     id: Optional[str] = None
@@ -304,6 +351,204 @@ def playback_status(endpoint_id: str, authorization: str | None = Header(default
         return endpoint_status(endpoint_id)
     except Exception as exc:
         raise HTTPException(502, str(exc))
+
+
+def _spotify_config():
+    config = load_provider_secrets().get('spotify')
+    if not config:
+        raise HTTPException(409, 'Spotify Soloist is not configured')
+    return config
+
+
+def _sonos_config(require_authorised=False):
+    config = load_provider_secrets().get('sonos')
+    if not config:
+        raise HTTPException(409, 'Sonos cloud account is not configured')
+    if require_authorised and not config.get('access_token'):
+        raise HTTPException(409, 'Sonos account is not authorised')
+    if config.get('refresh_token') and config.get('access_token'):
+        obtained=int(config.get('obtained_at') or 0); expires=int(config.get('expires_in') or 86400)
+        if obtained and time.time() >= obtained + expires - 120:
+            try:
+                fresh=sonos_cloud.refresh(config); config.update(fresh); save_provider_secret('sonos',config)
+            except Exception as exc:
+                raise HTTPException(502, f'Sonos token refresh failed: {exc}')
+    return config
+
+
+@app.get('/api/v1/providers/spotify')
+def spotify_status(authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=load_provider_secrets().get('spotify') or {}
+    out=spotify_soloist.redacted(config)
+    if out['binary_available']:
+        try: out['runtime']=spotify_soloist.status(config)
+        except Exception as exc: out['runtime_error']=str(exc)
+    return out
+
+
+@app.post('/api/v1/providers/spotify/configure')
+def spotify_configure(item: SpotifyConfigInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=item.model_dump(); save_provider_secret('spotify',config)
+    return spotify_soloist.redacted(config)
+
+
+@app.delete('/api/v1/providers/spotify/configure')
+def spotify_disconnect(authorization: str | None = Header(default=None)):
+    _require_token(authorization); save_provider_secret('spotify',None); return {'ok':True}
+
+
+@app.post('/api/v1/providers/spotify/play')
+def spotify_play(item: SpotifyPlayInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try: return spotify_soloist.play(_spotify_config(),item.uri)
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.post('/api/v1/providers/spotify/{command}')
+def spotify_command(command: str, value: int | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_spotify_config()
+    funcs={'pause':spotify_soloist.pause,'next':spotify_soloist.next_track,'previous':spotify_soloist.previous,
+           'activate':spotify_soloist.activate,'deactivate':spotify_soloist.deactivate}
+    try:
+        if command=='volume':
+            if value is None: raise HTTPException(400,'volume value required')
+            return spotify_soloist.volume(config,value)
+        if command not in funcs: raise HTTPException(404,'Unknown Spotify command')
+        return funcs[command](config)
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.get('/api/v1/providers/spotify/now')
+def spotify_now(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try: return spotify_soloist.now(_spotify_config())
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.get('/api/v1/providers/spotify/queue')
+def spotify_queue(limit: int = Query(default=20, ge=1, le=80), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try: return spotify_soloist.queue(_spotify_config(),limit)
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.get('/api/v1/providers/sonos')
+def sonos_cloud_status(authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=load_provider_secrets().get('sonos') or {}
+    return sonos_cloud.redacted(config)
+
+
+@app.post('/api/v1/providers/sonos/configure')
+def sonos_cloud_configure(item: SonosCloudConfigInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    config=load_provider_secrets().get('sonos') or {}; config.update(item.model_dump()); save_provider_secret('sonos',config)
+    return sonos_cloud.redacted(config)
+
+
+@app.delete('/api/v1/providers/sonos/configure')
+def sonos_cloud_disconnect(authorization: str | None = Header(default=None)):
+    _require_token(authorization); save_provider_secret('sonos',None); return {'ok':True}
+
+
+@app.get('/api/v1/providers/sonos/authorize-url')
+def sonos_cloud_authorize_url(authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(); state=uuid.uuid4().hex
+    config['oauth_state']=state; save_provider_secret('sonos',config)
+    return {'url':sonos_cloud.authorization_url(config,state),'state':state}
+
+
+@app.post('/api/v1/providers/sonos/exchange-code')
+def sonos_cloud_exchange(item: SonosCodeInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config()
+    try: token=sonos_cloud.exchange_code(config,item.code.strip())
+    except Exception as exc: raise HTTPException(502,f'Sonos authorization failed: {exc}')
+    config.update(token); save_provider_secret('sonos',config); return sonos_cloud.redacted(config)
+
+
+@app.post('/api/v1/providers/sonos/tokens')
+def sonos_cloud_tokens(item: SonosTokenInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(); config.update(item.model_dump(exclude_none=True)); config['obtained_at']=int(time.time())
+    save_provider_secret('sonos',config); return sonos_cloud.redacted(config)
+
+
+@app.get('/api/v1/providers/sonos/households')
+def sonos_cloud_households(authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(True)
+    try: return {'households':sonos_cloud.households(config)}
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.get('/api/v1/providers/sonos/households/{household_id}/groups')
+def sonos_cloud_groups(household_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(True)
+    try: return sonos_cloud.groups(config,household_id)
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.get('/api/v1/providers/sonos/households/{household_id}/favorites')
+def sonos_cloud_favorites(household_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(True)
+    try: return sonos_cloud.favorites(config,household_id)
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.post('/api/v1/providers/sonos/favorite')
+def sonos_cloud_play_favorite(item: SonosFavoritePlayInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=_sonos_config(True)
+    try: return sonos_cloud.load_favorite(config,item.group_id,item.favorite_id)
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+def _bridge_config(provider):
+    if provider not in provider_bridge.SUPPORTED:
+        raise HTTPException(404,'Unknown licensed provider')
+    config=load_provider_secrets().get(provider)
+    if not config: raise HTTPException(409,f'{provider} bridge is not configured')
+    return config
+
+
+@app.get('/api/v1/providers/bridge/{provider}')
+def bridge_status(provider: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization); config=load_provider_secrets().get(provider) or {}
+    if provider not in provider_bridge.SUPPORTED: raise HTTPException(404,'Unknown licensed provider')
+    out=provider_bridge.redacted(config)
+    if out['configured']:
+        try: out['runtime']=provider_bridge.status(config); out['available']=True
+        except Exception as exc: out['available']=False; out['runtime_error']=str(exc)
+    else: out['available']=False
+    return out
+
+
+@app.post('/api/v1/providers/bridge/{provider}/configure')
+def bridge_configure(provider: str, item: ProviderBridgeConfigInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if provider not in provider_bridge.SUPPORTED: raise HTTPException(404,'Unknown licensed provider')
+    config={k:v for k,v in item.model_dump().items() if v not in (None,'')}; save_provider_secret(provider,config)
+    return provider_bridge.redacted(config)
+
+
+@app.delete('/api/v1/providers/bridge/{provider}/configure')
+def bridge_disconnect(provider: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if provider not in provider_bridge.SUPPORTED: raise HTTPException(404,'Unknown licensed provider')
+    save_provider_secret(provider,None); return {'ok':True}
+
+
+@app.get('/api/v1/providers/bridge/{provider}/search')
+def bridge_search(provider: str, q: str = Query(min_length=1), limit: int = Query(default=25, ge=1, le=100), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try: return provider_bridge.search(_bridge_config(provider),q,limit)
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+
+@app.post('/api/v1/providers/bridge/{provider}/play')
+def bridge_play(provider: str, item: ProviderBridgePlayInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try: return provider_bridge.play(_bridge_config(provider),item.item_id,item.endpoint_id,'highest_native')
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(502,str(exc))
 
 
 def _bandcamp_config():

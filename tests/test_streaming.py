@@ -148,3 +148,55 @@ class ProviderAPITests(unittest.TestCase):
         url = play.call_args.args[1]
         self.assertIn('/api/v1/providers/bandcamp/stream/song-123', url)
         self.assertNotIn('do-not-leak', url)
+
+
+class NewProviderAPITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        cls.headers = {'Authorization': 'Bearer test-token'}
+
+    def tearDown(self):
+        from app.streaming import save_provider_secret
+        for provider in ('spotify', 'sonos', 'tidal'):
+            save_provider_secret(provider, None)
+
+    def test_spotify_config_secret_is_redacted(self):
+        r = self.client.post('/api/v1/providers/spotify/configure', headers=self.headers,
+                             json={'api_key':'spotify-secret','device_name':'SC Spotify',
+                                   'binary':'/missing/soloist','ws':'127.0.0.1:9090',
+                                   'data_dir':'/data/spotify'})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn('spotify-secret', r.text)
+        self.assertFalse(r.json()['binary_available'])
+
+    def test_sonos_config_secret_is_redacted(self):
+        r = self.client.post('/api/v1/providers/sonos/configure', headers=self.headers,
+                             json={'client_id':'sonos-client','client_secret':'sonos-secret',
+                                   'redirect_uri':'https://example.test/sonos'})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn('sonos-secret', r.text)
+        self.assertTrue(r.json()['configured'])
+
+    def test_sonos_favorite_uses_control_api_adapter(self):
+        from app.streaming import save_provider_secret
+        save_provider_secret('sonos', {'client_id':'c','client_secret':'s',
+            'redirect_uri':'https://example.test/sonos','access_token':'a',
+            'obtained_at':9999999999,'expires_in':86400})
+        with patch('app.main.sonos_cloud.load_favorite', return_value={'ok':True}) as play:
+            r = self.client.post('/api/v1/providers/sonos/favorite', headers=self.headers,
+                                 json={'group_id':'group-1','favorite_id':'fav-1'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(play.call_args.args[1:], ('group-1','fav-1'))
+
+    def test_licensed_bridge_forces_highest_quality_policy(self):
+        with patch('app.main.provider_bridge.play', return_value={'ok':True}) as play:
+            r = self.client.post('/api/v1/providers/bridge/tidal/configure', headers=self.headers,
+                                 json={'base_url':'http://127.0.0.1:9999',
+                                       'client_id':'tidal','client_secret':'super-secret-value'})
+            self.assertEqual(r.status_code, 200)
+            self.assertNotIn('super-secret-value', r.text)
+            r = self.client.post('/api/v1/providers/bridge/tidal/play', headers=self.headers,
+                                 json={'item_id':'track-1','endpoint_id':'surround'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(play.call_args.args[3], 'highest_native')

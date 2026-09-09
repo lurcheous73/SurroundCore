@@ -21,7 +21,7 @@ systemctl enable --now docker
 grep -q '^user_allow_other$' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
 
 install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore \
-  /srv/surroundcore/sources /srv/surroundcore/sources/ingest /var/cache/surroundcore /var/lib/surroundcore/ingest /opt/surroundcore/makemkv
+  /srv/surroundcore/sources /srv/surroundcore/sources/ingest /var/cache/surroundcore /var/lib/surroundcore/ingest /opt/surroundcore/makemkv /opt/surroundcore/spotify
 if [ ! -d /srv/surroundcore/media ]; then
   install -d -m 0755 /srv/surroundcore/media
 fi
