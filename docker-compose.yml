@@ -20,3 +20,27 @@ services:
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
       - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:ro,rslave
       - ${SURROUNDCORE_CACHE:-/var/cache/surroundcore}:/cache
+
+  surround-ingest:
+    build: ./ingest
+    container_name: surround-ingest
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
+      SURROUNDCORE_CORE_URL: http://127.0.0.1:8080
+      SURROUNDCORE_INGEST_ROOT: /ingest
+      SURROUNDCORE_INGEST_LIBRARY: /library
+      SURROUNDCORE_AUTO_RIP: ${SURROUNDCORE_AUTO_RIP:-true}
+      SURROUNDCORE_AUTO_NETMD: ${SURROUNDCORE_AUTO_NETMD:-true}
+      SURROUNDCORE_INGEST_EJECT: ${SURROUNDCORE_INGEST_EJECT:-true}
+      SURROUNDCORE_INGEST_KEEP_UPLOADS: ${SURROUNDCORE_INGEST_KEEP_UPLOADS:-false}
+      SURROUNDCORE_INGEST_POLL_SECONDS: ${SURROUNDCORE_INGEST_POLL_SECONDS:-8}
+      SURROUNDCORE_INGEST_MAX_UPLOAD_GB: ${SURROUNDCORE_INGEST_MAX_UPLOAD_GB:-0}
+      SURROUNDCORE_MAKEMKVCON: ${SURROUNDCORE_MAKEMKVCON:-/opt/makemkv/makemkvcon}
+    volumes:
+      - ${SURROUNDCORE_INGEST_DATA:-/var/lib/surroundcore/ingest}:/ingest
+      - ${SURROUNDCORE_INGEST_LIBRARY:-/srv/surroundcore/sources/ingest}:/library
+      - ${SURROUNDCORE_MAKEMKV_DIR:-/opt/surroundcore/makemkv}:/opt/makemkv:ro
+      - /run/udev:/run/udev:ro

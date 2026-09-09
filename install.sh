@@ -21,11 +21,11 @@ systemctl enable --now docker
 grep -q '^user_allow_other$' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
 
 install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore \
-  /srv/surroundcore/sources /var/cache/surroundcore
+  /srv/surroundcore/sources /srv/surroundcore/sources/ingest /var/cache/surroundcore /var/lib/surroundcore/ingest /opt/surroundcore/makemkv
 if [ ! -d /srv/surroundcore/media ]; then
   install -d -m 0755 /srv/surroundcore/media
 fi
-cp -a core docker-compose.yml .env.example /opt/surroundcore/
+cp -a core ingest docker-compose.yml .env.example /opt/surroundcore/
 cp endpoint/surround-agent.py /usr/local/lib/surroundcore/
 cp endpoint/surround-agent.service /etc/systemd/system/
 chmod 0755 /usr/local/lib/surroundcore/surround-agent.py
@@ -57,4 +57,5 @@ else
 fi
 
 echo "SurroundCore API: http://${IP}:8080/docs"
+echo "Ingest web UI:    http://${IP}:8082/ingest"
 echo "Endpoint API:     http://${IP}:8090/v1/capabilities (when audio exists)"
