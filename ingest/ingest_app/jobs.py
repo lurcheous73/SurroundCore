@@ -153,7 +153,7 @@ def _monitor():
         if AUTO_NETMD and engine.netmd_available():
             try:
                 status=engine.netmd_status(); fp=status.get('fingerprint','') if status.get('available') else ''
-                if fp and fp != last_netmd:
+                if fp and fp != last_netmd and status.get('rippable', True):
                     enqueue('netmd','netmd',status.get('disc_title') or 'MiniDisc',fp); last_netmd=fp
                 if not fp: last_netmd=''
             except Exception: pass

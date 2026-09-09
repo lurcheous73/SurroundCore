@@ -20,7 +20,7 @@ from .providers import provider_status, quality_policy
 from . import bandcamp as bandcamp_provider
 from . import spotify_soloist, sonos_cloud, provider_bridge
 from .podcasts import fetch_feed as fetch_podcast_feed
-from .quality import output_route, source_request
+from .quality import output_route, source_request, pcm_playback_plan
 from .playback import play_url, stop as stop_endpoint, status as endpoint_status
 from .webui import streaming_setup_html
 from .sources import (SOURCE_KINDS, CACHE_POLICIES, validate_source, source_status,
@@ -29,6 +29,7 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
                  save_group, list_groups, get_group, delete_group, update_group_latency,
                  save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
+from . import sessions
 
 app = FastAPI(title='SurroundCore', version='0.5.0-dev')
 
@@ -45,6 +46,14 @@ class EndpointPlayRequest(BaseModel):
     media_id: int
     device: str = 'default'
     volume: float = 0.35
+    position_seconds: float = 0.0
+
+
+class EndpointProgrammeRequest(BaseModel):
+    media_ids: list[int]
+    device: str = 'default'
+    volume: float = 0.35
+    position_seconds: float = 0.0
 
 
 class SonosPlayRequest(BaseModel):
@@ -910,19 +919,112 @@ def programme_stream(request: Request, media_ids: str, token: str | None = Query
     return ranged_file(cached, request.headers.get('range'), 'SurroundCore Group Programme.flac')
 
 
+@app.get('/api/v1/endpoints/{endpoint_id}/plan/{media_id}')
+def endpoint_plan(endpoint_id: str, media_id: int, device: str = Query(default='default'), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
+    if not endpoint or endpoint.get('kind') != 'alsa':
+        raise HTTPException(404, 'ALSA endpoint not found')
+    media = get_media(media_id)
+    if not media:
+        raise HTTPException(404, 'Media not found')
+    return {'endpoint': endpoint_id, 'media_id': media_id, 'plan': pcm_playback_plan(media, endpoint, device, load_settings())}
+
+
 @app.post('/api/v1/endpoints/{endpoint_id}/play')
 def endpoint_play(endpoint_id: str, item: EndpointPlayRequest, authorization: str | None = Header(default=None)):
     token = _require_token(authorization)
     endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
     if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
         raise HTTPException(404, 'ALSA endpoint not found')
-    if not get_media(item.media_id):
+    media = get_media(item.media_id)
+    if not media:
         raise HTTPException(404, 'Media not found')
+    plan = pcm_playback_plan(media, endpoint, item.device, load_settings())
+    if not plan.get('supported'):
+        raise HTTPException(409, plan.get('reason') or 'Endpoint cannot play source natively')
     volume = max(0.0, min(float(item.volume), 1.0))
     result = _post_json(endpoint['address'].rstrip('/') + '/v1/play', {
         'url': _media_url(item.media_id, token), 'device': item.device, 'volume': volume,
+        'position_seconds': item.position_seconds,
+        'mode': plan.get('mode', 'direct'), 'source': plan.get('source'),
     }, token)
-    return {'ok': True, 'endpoint': endpoint_id, 'volume': volume, 'result': result}
+    session = sessions.start_library(endpoint_id, [media], position_seconds=item.position_seconds, plan=plan)
+    return {'ok': True, 'endpoint': endpoint_id, 'volume': volume, 'plan': plan, 'session': session, 'result': result}
+
+
+@app.post('/api/v1/endpoints/{endpoint_id}/programme')
+def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authorization: str | None = Header(default=None)):
+    token = _require_token(authorization)
+    endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
+    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
+        raise HTTPException(404, 'ALSA endpoint not found')
+    if not item.media_ids:
+        raise HTTPException(400, 'Programme requires media_ids')
+    media = [get_media(media_id) for media_id in item.media_ids]
+    if any(x is None for x in media):
+        raise HTTPException(404, 'Programme media not found')
+    settings = load_settings()
+    plans = [pcm_playback_plan(x, endpoint, item.device, settings) for x in media]
+    failed = next((p for p in plans if not p.get('supported')), None)
+    if failed:
+        raise HTTPException(409, failed.get('reason') or 'Endpoint cannot play programme natively')
+    if any(p.get('mode') != 'direct' for p in plans):
+        raise HTTPException(409, 'Native gapless programme requires direct-capable media')
+    keys = [(p['source'].get('sample_rate'), p['source'].get('channels'), p['source'].get('bit_depth'),
+             str(p['source'].get('channel_layout') or '').lower()) for p in plans]
+    if any(k != keys[0] for k in keys[1:]):
+        raise HTTPException(409, 'Native gapless programme requires identical sample rate, channel layout and bit depth')
+    volume = max(0.0, min(float(item.volume), 1.0))
+    result = _post_json(endpoint['address'].rstrip('/') + '/v1/programme', {
+        'urls': [_media_url(media_id, token) for media_id in item.media_ids],
+        'device': item.device, 'volume': volume, 'position_seconds': item.position_seconds,
+        'mode': 'direct', 'source': plans[0]['source'], 'sources': [p['source'] for p in plans],
+    }, token)
+    session = sessions.start_library(endpoint_id, media, position_seconds=item.position_seconds,
+                                     plan={'mode':'direct','gapless':True,'tracks':len(media)})
+    return {'ok': True, 'endpoint': endpoint_id, 'plan': session['plan'], 'session': session, 'result': result}
+
+
+@app.get('/api/v1/sessions')
+def playback_sessions(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'sessions': sessions.list_views()}
+
+
+@app.get('/api/v1/sessions/{endpoint_id}')
+def playback_session(endpoint_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    session = sessions.view(endpoint_id)
+    if not session: raise HTTPException(404, 'Playback session not found')
+    return session
+
+
+def _session_endpoint(endpoint_id):
+    endpoint = next((e for e in _all_endpoints() if e.get('id') == endpoint_id), None)
+    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
+        raise HTTPException(404, 'ALSA endpoint not found')
+    return endpoint
+
+
+@app.post('/api/v1/sessions/{endpoint_id}/{control}')
+def playback_session_control(endpoint_id: str, control: str, position_seconds: float | None = Query(default=None), authorization: str | None = Header(default=None)):
+    token = _require_token(authorization); endpoint = _session_endpoint(endpoint_id)
+    if not sessions.view(endpoint_id): raise HTTPException(404, 'Playback session not found')
+    if control in ('pause','resume','stop'):
+        result = _post_json(endpoint['address'].rstrip('/') + '/v1/' + control, {}, token)
+        session = sessions.clear(endpoint_id) if control == 'stop' else sessions.set_state(endpoint_id, 'paused' if control == 'pause' else 'playing')
+        return {'ok': True, 'session': session, 'result': result}
+    if control == 'seek':
+        if position_seconds is None: raise HTTPException(400, 'position_seconds required')
+        target = max(0.0, float(position_seconds)); result = _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, token)
+        return {'ok': True, 'session': sessions.seek(endpoint_id, target), 'result': result}
+    if control in ('next','previous'):
+        target = sessions.control_target(endpoint_id, control)
+        if target is None: raise HTTPException(409, f'{control} is not available')
+        result = _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, token)
+        return {'ok': True, 'session': sessions.seek(endpoint_id, target), 'result': result}
+    raise HTTPException(404, 'Unknown playback control')
 
 
 @app.post('/api/v1/endpoints/{endpoint_id}/stop')
@@ -932,7 +1034,8 @@ def endpoint_stop(endpoint_id: str, authorization: str | None = Header(default=N
     if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
         raise HTTPException(404, 'ALSA endpoint not found')
     result = _post_json(endpoint['address'].rstrip('/') + '/v1/stop', {}, token)
-    return {'ok': True, 'result': result}
+    session = sessions.clear(endpoint_id)
+    return {'ok': True, 'session': session, 'result': result}
 
 
 @app.post('/api/v1/sonos/play')

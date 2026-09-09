@@ -5,7 +5,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -19,7 +21,18 @@ NETMD_DIR = Path('/opt/surroundcore/netmd')
 
 
 def run(args, cwd=None, check=False, timeout=None):
-    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        stdout, stderr = proc.communicate()
+        code = 124
+        stderr = (stderr or '') + f'\ncommand timed out after {timeout}s'
+    p = subprocess.CompletedProcess(args, code, stdout, stderr)
     if check and p.returncode:
         raise RuntimeError((p.stderr or p.stdout or 'command failed').strip())
     return p
@@ -41,6 +54,8 @@ def tool(name):
 def makemkv_available():
     return bool(tool('makemkvcon'))
 
+
+_NETMD_LOCK = threading.Lock()
 
 def netmd_available():
     return (NETMD_DIR / 'surroundcore-md-status.cjs').is_file() and bool(tool('node'))
@@ -80,22 +95,33 @@ def audio_cd_info(device):
 
 
 def block_identity(device):
-    values = {}
-    for key in ('TYPE', 'LABEL', 'UUID'):
-        p = run(['blkid', '-o', 'value', '-s', key, device]) if tool('blkid') else None
-        values[key.lower()] = p.stdout.strip() if p and p.returncode == 0 else ''
-    s = run(['blockdev', '--getsize64', device]) if tool('blockdev') else None
-    values['bytes'] = int(s.stdout.strip()) if s and s.returncode == 0 and s.stdout.strip().isdigit() else 0
+    values = {'type':'', 'label':'', 'uuid':''}
+    if tool('blkid'):
+        p = run(['blkid', '-o', 'export', device], timeout=3)
+        if p.returncode == 0:
+            for line in p.stdout.splitlines():
+                if '=' not in line: continue
+                key, value = line.split('=', 1)
+                if key == 'TYPE': values['type'] = value
+                elif key == 'LABEL': values['label'] = value
+                elif key == 'UUID': values['uuid'] = value
+    size = run(['blockdev', '--getsize64', device], timeout=3) if tool('blockdev') else None
+    values['bytes'] = int(size.stdout.strip()) if size and size.returncode == 0 and size.stdout.strip().isdigit() else 0
     raw = '|'.join(str(values[k]) for k in sorted(values))
     values['fingerprint'] = hashlib.sha256(raw.encode()).hexdigest()[:24] if raw.strip('|0') else ''
     return values
 
 
 def media_identity(device):
+    # Data DVD/Blu-ray should never wait on an Audio-CD probe. Resolve the
+    # block identity first and only ask cd-paranoia for CD-sized/no-FS media.
+    info = block_identity(device)
+    if not info.get('type') and not info.get('bytes'):
+        return None
+    if info.get('type') or int(info.get('bytes') or 0) > 900_000_000:
+        return {'kind': 'data_disc', **info}
     cd = audio_cd_info(device)
     if cd: return cd
-    info = block_identity(device)
-    if not info.get('type') and not info.get('bytes'): return None
     return {'kind': 'data_disc', **info}
 
 
@@ -389,9 +415,8 @@ def process_physical(device):
         return process_mounted(root, label or 'Optical Disc', identity.get('fingerprint',''), mk_source)
 
 
-def netmd_status():
-    if not netmd_available(): return {'available': False, 'reason': 'NetMD helper not installed'}
-    p = run(['node', str(NETMD_DIR/'surroundcore-md-status.cjs')], timeout=20)
+def _netmd_status_unlocked():
+    p = run(['node', str(NETMD_DIR/'surroundcore-md-status.cjs')], timeout=12)
     if p.returncode: return {'available': False, 'reason': (p.stderr or p.stdout).strip()[-500:]}
     try:
         data = json.loads(p.stdout.strip().splitlines()[-1]); data['available'] = True; return data
@@ -399,37 +424,72 @@ def netmd_status():
         return {'available': False, 'reason': 'NetMD helper returned invalid status'}
 
 
+def netmd_status():
+    if not netmd_available(): return {'available': False, 'reason': 'NetMD helper not installed'}
+    if not _NETMD_LOCK.acquire(timeout=1):
+        return {'available': False, 'reason': 'NetMD device is busy'}
+    try: return _netmd_status_unlocked()
+    finally: _NETMD_LOCK.release()
+
+
 def rip_netmd():
-    status = netmd_status()
-    if not status.get('available'): raise RuntimeError(status.get('reason') or 'No NetMD device')
-    tracks = int(status.get('track_count') or 0)
-    if tracks <= 0: raise RuntimeError('MiniDisc contains no tracks')
-    fp = status.get('fingerprint') or hashlib.sha256(json.dumps(status,sort_keys=True).encode()).hexdigest()[:24]
-    outdir = album_dir(status.get('disc_title') or 'MiniDisc', fp)
-    work = Path(tempfile.mkdtemp(prefix='netmd-', dir=str(INGEST_ROOT/'work')))
-    outputs=[]
+    if not netmd_available(): raise RuntimeError('NetMD helper not installed')
+    if not _NETMD_LOCK.acquire(timeout=2): raise RuntimeError('NetMD device is busy')
+    outdir = None; work = None
     try:
-        for i in range(tracks):
-            base = work / f'{i+1:02d}-track'
-            p = run(['node', str(NETMD_DIR/'surroundcore-md-rip.cjs'), str(i), str(base)], timeout=None)
-            if p.returncode: raise RuntimeError((p.stderr or p.stdout or f'NetMD track {i+1} failed').strip())
-            raw = None
-            for line in p.stdout.splitlines():
-                if line.startswith('CMMDDONE\t'):
-                    parts=line.split('\t'); raw=Path(parts[1]) if len(parts)>1 else None
+        status = _netmd_status_unlocked()
+        if not status.get('available'): raise RuntimeError(status.get('reason') or 'No NetMD device')
+        if not status.get('rippable', True): raise RuntimeError('Hi-MD detected; standard NetMD rip path is not applicable')
+        track_count = int(status.get('track_count') or 0)
+        if track_count <= 0: raise RuntimeError('MiniDisc contains no tracks')
+        fp = status.get('fingerprint') or hashlib.sha256(json.dumps(status,sort_keys=True).encode()).hexdigest()[:24]
+        outdir = album_dir(status.get('disc_title') or 'MiniDisc', fp)
+        work = Path(tempfile.mkdtemp(prefix='netmd-', dir=str(INGEST_ROOT/'work')))
+        rawdir = work / 'raw'; rawdir.mkdir(parents=True, exist_ok=True)
+        p = run(['node', str(NETMD_DIR/'surroundcore-md-rip.cjs'), 'all', str(rawdir)], timeout=None)
+        if p.returncode: raise RuntimeError((p.stderr or p.stdout or 'NetMD disc rip failed').strip())
+        raw_tracks = {}
+        for line in p.stdout.splitlines():
+            if not line.startswith('CMMDDONE\t'): continue
+            parts=line.split('\t')
+            if len(parts) >= 3:
+                try: raw_tracks[int(parts[1])] = Path(parts[2])
+                except Exception: pass
+        if len(raw_tracks) != track_count:
+            raise RuntimeError(f'NetMD rip returned {len(raw_tracks)} of {track_count} tracks')
+        metadata = {int(t.get('index',i)): t for i,t in enumerate(status.get('tracks') or [])}
+        outputs=[]
+        album = str(status.get('disc_title') or 'MiniDisc')
+        for i in range(track_count):
+            raw = raw_tracks.get(i)
             if not raw or not raw.is_file(): raise RuntimeError(f'NetMD track {i+1} produced no ATRAC file')
-            dst=outdir/f'{i+1:02d} Track {i+1:02d}.flac'
-            run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(raw),'-map','0:a:0','-vn',
-                 '-c:a','flac','-compression_level','8','-sample_fmt','s16','-ar','44100','-ac','2',str(dst)],check=True)
-            s=ffprobe_streams(dst)
-            if not s or s[0]['channels']!=2 or s[0]['sample_rate']!=44100: raise RuntimeError(f'NetMD track {i+1} verification failed')
-            outputs.append({'path':str(dst),'layout':'Stereo','verified':True})
-        write_manifest(outdir, {'source':'netmd','device':status.get('device'),'fingerprint':fp,'outputs':outputs})
-        return {'kind':'netmd','output_dir':str(outdir),'outputs':outputs}
+            md = metadata.get(i) or {}
+            title = str(md.get('title') or f'Track {i+1:02d}').strip() or f'Track {i+1:02d}'
+            dst=outdir/f'{i+1:02d} {safe_name(title)}.flac'
+            cmd=['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(raw),'-map','0:a:0','-vn',
+                 '-c:a','flac','-compression_level','8','-ar','44100',
+                 '-metadata',f'title={title}','-metadata',f'album={album}','-metadata',f'track={i+1}',str(dst)]
+            run(cmd,check=True)
+            streams=ffprobe_streams(dst)
+            if not streams or streams[0]['sample_rate']!=44100 or streams[0]['channels'] not in (1,2):
+                raise RuntimeError(f'NetMD track {i+1} verification failed')
+            channels=int(streams[0]['channels'])
+            outputs.append({'path':str(dst),'layout':'Mono' if channels==1 else 'Stereo','channels':channels,
+                            'sample_rate':44100,'verified':True,'track_index':i,'title':title,
+                            'encoding':md.get('encoding'),'group_title':md.get('group_title') or ''})
+        manifest = {
+            'source':'netmd','device':status.get('device'),'device_signature':status.get('device_signature'),
+            'fingerprint':fp,'toc_hash':status.get('toc_hash'),'disc_title':album,
+            'tracks':status.get('tracks') or [],'groups':status.get('groups') or [],'outputs':outputs
+        }
+        write_manifest(outdir, manifest)
+        return {'kind':'netmd','output_dir':str(outdir),'outputs':outputs,'disc':status}
     except Exception:
-        shutil.rmtree(outdir, ignore_errors=True); raise
+        if outdir: shutil.rmtree(outdir, ignore_errors=True)
+        raise
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if work: shutil.rmtree(work, ignore_errors=True)
+        _NETMD_LOCK.release()
 
 
 def core_headers():

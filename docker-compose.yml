@@ -26,6 +26,7 @@ services:
   surround-ingest:
     build: ./ingest
     container_name: surround-ingest
+    init: true
     restart: unless-stopped
     network_mode: host
     privileged: true
