@@ -23,6 +23,7 @@ class Edition:
     sample_rate: int
     bit_depth: Optional[int]
     duration: float
+    metadata: Optional[dict] = None
 
     def dict(self):
         return asdict(self)
