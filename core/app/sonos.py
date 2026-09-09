@@ -124,16 +124,40 @@ def set_volume(zone, volume):
     return volume
 
 
-def play_uri(zone, uri):
+def prepare_uri(zone, uri):
     ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
     if not ip:
         raise RuntimeError('Sonos coordinator IP unavailable')
     service = 'urn:schemas-upnp-org:service:AVTransport:1'
     _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'SetAVTransportURI',
           {'InstanceID': 0, 'CurrentURI': uri, 'CurrentURIMetaData': ''})
-    _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'Play',
-          {'InstanceID': 0, 'Speed': 1})
     return True
+
+
+def play(zone):
+    ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip:
+        raise RuntimeError('Sonos coordinator IP unavailable')
+    service = 'urn:schemas-upnp-org:service:AVTransport:1'
+    _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'Play', {'InstanceID': 0, 'Speed': 1})
+    return True
+
+
+def seek(zone, seconds):
+    ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip:
+        raise RuntimeError('Sonos coordinator IP unavailable')
+    seconds = max(0, int(round(float(seconds))))
+    target = f'{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}'
+    service = 'urn:schemas-upnp-org:service:AVTransport:1'
+    _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'Seek',
+          {'InstanceID': 0, 'Unit': 'REL_TIME', 'Target': target})
+    return target
+
+
+def play_uri(zone, uri):
+    prepare_uri(zone, uri)
+    return play(zone)
 
 
 def stop(zone):

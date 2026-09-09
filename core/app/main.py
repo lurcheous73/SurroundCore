@@ -3,6 +3,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -12,9 +13,11 @@ from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
 from .media import scan
 from .streaming import ranged_file, stereo_flac_cache
-from .db import init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints
+from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
+                 save_group, list_groups, get_group, delete_group, update_group_latency)
+from .groups import GroupPlayback
 
-app = FastAPI(title='SurroundCore', version='0.2.1')
+app = FastAPI(title='SurroundCore', version='0.3.0')
 
 
 class EndpointRegistration(BaseModel):
@@ -37,6 +40,29 @@ class SonosPlayRequest(BaseModel):
     volume: int = 25
 
 
+class GroupMemberRequest(BaseModel):
+    endpoint_id: str
+    latency_ms: int = 0
+    volume: Optional[float] = None
+    enabled: bool = True
+
+
+class GroupRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    members: list[GroupMemberRequest]
+
+
+class GroupPlayRequest(BaseModel):
+    media_id: int
+    position_seconds: float = 0.0
+    lead_ms: int = 4000
+
+
+class LatencyRequest(BaseModel):
+    latency_ms: int
+
+
 @app.on_event('startup')
 def startup():
     init_db()
@@ -44,7 +70,7 @@ def startup():
 
 @app.get('/api/v1/health')
 def health():
-    return {'ok': True, 'service': 'SurroundCore', 'version': '0.2.1'}
+    return {'ok': True, 'service': 'SurroundCore', 'version': '0.3.0'}
 
 
 def _require_token(authorization=None, token=None):
@@ -81,6 +107,69 @@ def _post_json(url, body, token):
         headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'})
     with urllib.request.urlopen(request, timeout=8) as response:
         return json.loads(response.read().decode() or '{}')
+
+
+_group_playback = GroupPlayback(_public_url, _post_json)
+
+
+@app.get('/api/v1/groups')
+def groups_list(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'groups': list_groups()}
+
+
+@app.post('/api/v1/groups')
+def groups_save(item: GroupRequest, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    group_id = item.id or ('group-' + uuid.uuid4().hex[:12])
+    members = [m.model_dump() for m in item.members]
+    save_group(group_id, item.name, members)
+    return {'ok': True, 'group': get_group(group_id)}
+
+
+@app.delete('/api/v1/groups/{group_id}')
+def groups_delete(group_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if not delete_group(group_id):
+        raise HTTPException(404, 'Group not found')
+    return {'ok': True}
+
+
+@app.put('/api/v1/groups/{group_id}/members/{endpoint_id}/latency')
+def groups_latency(group_id: str, endpoint_id: str, item: LatencyRequest, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if not update_group_latency(group_id, endpoint_id, item.latency_ms):
+        raise HTTPException(404, 'Group member not found')
+    return {'ok': True, 'group': get_group(group_id)}
+
+
+@app.post('/api/v1/groups/{group_id}/play')
+def groups_play(group_id: str, item: GroupPlayRequest, authorization: str | None = Header(default=None)):
+    token = _require_token(authorization)
+    group = get_group(group_id)
+    if not group:
+        raise HTTPException(404, 'Group not found')
+    session_id = 'session-' + uuid.uuid4().hex[:12]
+    try:
+        return {'ok': True, 'session': _group_playback.play(
+            session_id, group, _all_endpoints(), item.media_id, token, item.position_seconds, item.lead_ms)}
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@app.post('/api/v1/groups/sessions/{session_id}/stop')
+def groups_stop(session_id: str, authorization: str | None = Header(default=None)):
+    token = _require_token(authorization)
+    if not _group_playback.stop(session_id, _all_endpoints(), token):
+        raise HTTPException(404, 'Session not found')
+    return {'ok': True}
+
+
+@app.get('/api/v1/groups/sessions')
+def groups_sessions(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'sessions': _group_playback.list_sessions()}
+
 
 
 @app.get('/api/v1/endpoints')

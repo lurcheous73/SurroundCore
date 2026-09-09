@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PLAYER = None
 PLAYER_STATE = {}
+PREPARED = {}
 TOKEN = os.getenv('SURROUNDCORE_TOKEN', '')
 CORE_URL = os.getenv('SURROUNDCORE_CORE_URL', 'http://127.0.0.1:8080').rstrip('/')
 DEFAULT_DEVICE = os.getenv('SURROUNDCORE_DEFAULT_DEVICE', 'default')
@@ -79,6 +80,8 @@ def capabilities():
         'supported_output_types': ['analog', 'usb-audio', 'hdmi', 'spdif', 'aes3', 'i2s'],
         'channel_mapping': 'source-layout-preserved',
         'max_software_volume': MAX_VOLUME,
+        'control_api': 'surround-agent-v2',
+        'scheduled_group_playback': True,
     }
 
 
@@ -122,20 +125,23 @@ def stop_player():
             PLAYER.kill()
     PLAYER = None
     PLAYER_STATE = {}
+PREPARED = {}
 
 
-def play(url, device=None, volume=0.35):
+def play(url, device=None, volume=0.35, position_seconds=0.0):
     global PLAYER, PLAYER_STATE
     stop_player()
     device = device or DEFAULT_DEVICE
     volume = max(0.0, min(float(volume), MAX_VOLUME))
-    cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
+    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin']
+    if float(position_seconds or 0) > 0:
+        cmd += ['-ss', f'{float(position_seconds):.3f}']
+    cmd += [
         '-i', url, '-map', '0:a:0', '-vn', '-af', f'volume={volume:.4f}',
         '-f', 'alsa', device,
     ]
     PLAYER = subprocess.Popen(cmd)
-    PLAYER_STATE = {'pid': PLAYER.pid, 'device': device, 'volume': volume, 'url': url}
+    PLAYER_STATE = {'pid': PLAYER.pid, 'device': device, 'volume': volume, 'url': url, 'position_seconds': float(position_seconds or 0)}
     return {'ok': True, **PLAYER_STATE}
 
 
@@ -162,14 +168,27 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({'error': 'not found'}, 404)
 
     def do_POST(self):
+        global PREPARED
         if not self.authorised():
             return self.send_json({'error': 'unauthorised'}, 401)
         n = int(self.headers.get('Content-Length', '0'))
         data = json.loads(self.rfile.read(n) or b'{}')
+        if self.path == '/v1/prepare':
+            if not data.get('url'):
+                return self.send_json({'error': 'url required'}, 400)
+            PREPARED = {
+                'url': data['url'], 'device': data.get('device') or DEFAULT_DEVICE,
+                'volume': data.get('volume', 0.35), 'position_seconds': data.get('position_seconds', 0.0),
+            }
+            return self.send_json({'ok': True, 'prepared': PREPARED})
+        if self.path == '/v1/start':
+            if not PREPARED.get('url'):
+                return self.send_json({'error': 'nothing prepared'}, 409)
+            return self.send_json(play(PREPARED['url'], PREPARED.get('device'), PREPARED.get('volume', 0.35), PREPARED.get('position_seconds', 0.0)))
         if self.path == '/v1/play':
             if not data.get('url'):
                 return self.send_json({'error': 'url required'}, 400)
-            return self.send_json(play(data['url'], data.get('device'), data.get('volume', 0.35)))
+            return self.send_json(play(data['url'], data.get('device'), data.get('volume', 0.35), data.get('position_seconds', 0.0)))
         if self.path == '/v1/stop':
             stop_player()
             return self.send_json({'ok': True})

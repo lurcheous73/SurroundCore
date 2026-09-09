@@ -24,6 +24,20 @@ CREATE TABLE IF NOT EXISTS endpoints (
   capabilities_json TEXT NOT NULL DEFAULT '{}',
   last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS playback_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS playback_group_members (
+  group_id TEXT NOT NULL,
+  endpoint_id TEXT NOT NULL,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  volume INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(group_id, endpoint_id),
+  FOREIGN KEY(group_id) REFERENCES playback_groups(id) ON DELETE CASCADE
+);
 '''
 
 def connect():
@@ -76,3 +90,41 @@ def list_endpoints():
         for r in con.execute('SELECT * FROM endpoints ORDER BY name'):
             d=dict(r); d['capabilities']=json.loads(d.pop('capabilities_json') or '{}'); rows.append(d)
         return rows
+
+
+def save_group(group_id, name, members):
+    with connect() as con:
+        con.execute('INSERT INTO playback_groups(id,name) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name',
+                    (group_id, name))
+        con.execute('DELETE FROM playback_group_members WHERE group_id=?', (group_id,))
+        con.executemany('''INSERT INTO playback_group_members(group_id,endpoint_id,latency_ms,volume,enabled)
+            VALUES(?,?,?,?,?)''', [(group_id, m['endpoint_id'], int(m.get('latency_ms', 0)),
+                    m.get('volume'), 1 if m.get('enabled', True) else 0) for m in members])
+
+def list_groups():
+    with connect() as con:
+        groups=[]
+        for row in con.execute('SELECT * FROM playback_groups ORDER BY name'):
+            item=dict(row)
+            item['members']=[dict(m) for m in con.execute(
+                'SELECT endpoint_id,latency_ms,volume,enabled FROM playback_group_members WHERE group_id=? ORDER BY endpoint_id',
+                (item['id'],))]
+            for m in item['members']:
+                m['enabled']=bool(m['enabled'])
+            groups.append(item)
+        return groups
+
+def get_group(group_id):
+    return next((g for g in list_groups() if g['id'] == group_id), None)
+
+def delete_group(group_id):
+    with connect() as con:
+        con.execute('DELETE FROM playback_group_members WHERE group_id=?', (group_id,))
+        cur=con.execute('DELETE FROM playback_groups WHERE id=?', (group_id,))
+        return cur.rowcount > 0
+
+def update_group_latency(group_id, endpoint_id, latency_ms):
+    with connect() as con:
+        cur=con.execute('UPDATE playback_group_members SET latency_ms=? WHERE group_id=? AND endpoint_id=?',
+                        (int(latency_ms), group_id, endpoint_id))
+        return cur.rowcount > 0
