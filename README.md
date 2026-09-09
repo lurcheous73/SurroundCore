@@ -1,5 +1,17 @@
 # SurroundCore
 
+> **Free music should mean free software, not another monthly bill.** SurroundCore is a self-hosted, open music platform built to keep great audio hardware useful, preserve source quality, and put the owner—not a vendor subscription—back in control.
+
+**Licence:** AGPL-3.0-or-later · **Cost:** free · **Donations:** optional · **Cloud required for local playback:** no
+
+See [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+**Free, self-hosted, subscription-free music infrastructure for keeping good audio hardware useful.**
+
+SurroundCore is open source under the AGPL-3.0-or-later licence. There is no paid tier, no required cloud account, no remote kill switch, and no artificial end-of-life policy. If it saves your hardware and you want to buy the maintainer a coffee, lovely; functionality is never gated behind donations.
+
+See [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) for the project promise.
+
 SurroundCore is a Debian 13-only multichannel music core and endpoint system intended to sit alongside Meridian/Sooloos and be controlled by modern clients such as ControlMac 2026.
 
 Current status: **v0.5 development / developer preview**. Storage, synchronized playback, optical ingest and streaming providers are being developed as one system.
