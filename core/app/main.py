@@ -6,18 +6,23 @@ import urllib.request
 import uuid
 from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
 from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
 from .media import scan
-from .streaming import ranged_file, stereo_flac_cache, stereo_flac_program_cache
+from .streaming import (ranged_file, stereo_flac_cache, stereo_flac_program_cache,
+                        load_settings, save_settings)
+from .providers import provider_status, quality_policy
+from .quality import output_route, source_request
+from .playback import play_url, stop as stop_endpoint, status as endpoint_status
+from .webui import streaming_setup_html
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
                  save_group, list_groups, get_group, delete_group, update_group_latency)
 from .groups import GroupPlayback
 
-app = FastAPI(title='SurroundCore', version='0.3.0')
+app = FastAPI(title='SurroundCore', version='0.4.0-dev')
 
 
 class EndpointRegistration(BaseModel):
@@ -64,6 +69,36 @@ class LatencyRequest(BaseModel):
     latency_ms: int
 
 
+class StreamingSettingsUpdate(BaseModel):
+    prefer_lossless: Optional[bool] = None
+    prefer_airia: Optional[bool] = None
+    allow_mqa_passthrough: Optional[bool] = None
+    output_transport: Optional[str] = None
+    prefer_mhr: Optional[bool] = None
+    prefer_mmhr: Optional[bool] = None
+    allow_downsample: Optional[bool] = None
+    allow_downmix: Optional[bool] = None
+    providers: Optional[dict] = None
+
+
+class RadioStationInput(BaseModel):
+    name: str
+    url: str
+
+
+class PlaybackURLInput(BaseModel):
+    endpoint_id: str
+    url: str
+    device: str = 'default'
+
+
+class ProviderPlayInput(BaseModel):
+    provider: str
+    item_id: str
+    endpoint_id: str
+    device: str = 'default'
+
+
 @app.on_event('startup')
 def startup():
     init_db()
@@ -71,7 +106,12 @@ def startup():
 
 @app.get('/api/v1/health')
 def health():
-    return {'ok': True, 'service': 'SurroundCore', 'version': '0.3.0'}
+    return {'ok': True, 'service': 'SurroundCore', 'version': '0.4.0-dev'}
+
+
+@app.get('/setup/streaming', response_class=HTMLResponse)
+def streaming_setup():
+    return HTMLResponse(streaming_setup_html())
 
 
 def _require_token(authorization=None, token=None):
@@ -111,6 +151,98 @@ def _post_json(url, body, token):
 
 
 _group_playback = GroupPlayback(_public_url, _post_json)
+
+
+@app.get('/api/v1/streaming')
+def streaming_overview(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    settings = load_settings()
+    return {'settings': settings, 'quality': quality_policy(settings), 'providers': provider_status(settings)}
+
+
+@app.get('/api/v1/streaming/route/{endpoint_id}')
+def streaming_route(endpoint_id: str, channels: int = Query(default=2, ge=1, le=32), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    endpoint = next((e for e in _all_endpoints() if e.get('id') == endpoint_id), None)
+    if not endpoint:
+        raise HTTPException(404, 'Endpoint not found')
+    settings = load_settings()
+    return {'source_request': source_request(settings, channels), 'output': output_route(endpoint, channels, settings), 'endpoint': endpoint}
+
+
+@app.post('/api/v1/streaming/settings')
+def streaming_settings(item: StreamingSettingsUpdate, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    update = {k: v for k, v in item.model_dump().items() if v is not None}
+    settings = save_settings(update)
+    return {'settings': settings, 'quality': quality_policy(settings)}
+
+
+@app.post('/api/v1/streaming/radio')
+def add_radio(item: RadioStationInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    parsed = urllib.parse.urlparse(item.url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        raise HTTPException(400, 'Radio URL must be http or https')
+    settings = load_settings()
+    stations = list(settings.get('radio_stations') or [])
+    stations.append({'id': uuid.uuid4().hex[:12], 'name': item.name.strip(), 'url': item.url.strip()})
+    settings = save_settings({'radio_stations': stations})
+    return {'radio_stations': settings['radio_stations']}
+
+
+@app.delete('/api/v1/streaming/radio/{station_id}')
+def delete_radio(station_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    settings = load_settings()
+    stations = [station for station in settings.get('radio_stations', []) if station.get('id') != station_id]
+    settings = save_settings({'radio_stations': stations})
+    return {'radio_stations': settings['radio_stations']}
+
+
+@app.post('/api/v1/streaming/play')
+def streaming_play(item: ProviderPlayInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    if item.provider != 'internet_radio':
+        raise HTTPException(501, f'{item.provider} playback module is not installed')
+    settings = load_settings()
+    station = next((station for station in settings.get('radio_stations', []) if station.get('id') == item.item_id), None)
+    if not station:
+        raise HTTPException(404, 'Radio station not found')
+    try:
+        return play_url(item.endpoint_id, station['url'], item.device)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.post('/api/v1/playback/url')
+def playback_url(item: PlaybackURLInput, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    parsed = urllib.parse.urlparse(item.url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        raise HTTPException(400, 'Playback URL must be http or https')
+    try:
+        return play_url(item.endpoint_id, item.url, item.device)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.post('/api/v1/playback/{endpoint_id}/stop')
+def playback_stop(endpoint_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        return stop_endpoint(endpoint_id)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get('/api/v1/playback/{endpoint_id}/status')
+def playback_status(endpoint_id: str, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        return endpoint_status(endpoint_id)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
 
 
 @app.get('/api/v1/groups')

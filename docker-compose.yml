@@ -10,6 +10,7 @@ services:
       SURROUNDCORE_MEDIA: /media
       SURROUNDCORE_DATA: /data
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
+      SURROUNDCORE_AIRIA_DECODER: ${SURROUNDCORE_AIRIA_DECODER:-}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data

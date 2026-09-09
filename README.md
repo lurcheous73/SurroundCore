@@ -15,6 +15,20 @@ Current status: **early v0.1 foundation / developer preview**.
 - Provide a small authenticated HTTP API for ControlMac and other clients.
 - Run the Core in Docker while keeping physical ALSA/HDMI playback in a native endpoint agent.
 
+## Streaming foundation (v0.4 development)
+
+SurroundCore now owns streaming configuration and quality negotiation; ControlMac remains a control surface.
+
+- Core-hosted setup page at `/setup/streaming`
+- Provider-neutral streaming API and saved Internet Radio stations
+- Highest-native/lossless-first source policy with downsample/downmix disabled by default
+- MQA pass-through policy for legacy/provider-supplied MQA
+- Optional licensed AIRIA helper detection (AIRIA is never claimed when no module is installed)
+- Meridian output negotiation prefers MHR for stereo and MMHR for multichannel only when an endpoint actually advertises those transports
+- Generic ALSA endpoints explicitly advertise PCM rather than pretending to support Meridian transports
+
+See `docs/STREAMING.md` for provider status and the implemented/pending boundary.
+
 ## Required platform
 
 **Debian 13 (Trixie) only.**

@@ -2,6 +2,9 @@ import fcntl
 import hashlib
 import mimetypes
 import os
+import json
+import shutil
+from pathlib import Path
 import subprocess
 import tempfile
 import threading
@@ -127,3 +130,52 @@ def stereo_flac_program_cache(paths):
             try: os.unlink(manifest.name)
             except OSError: pass
     return output
+
+
+# Streaming service configuration lives on the Core, never in ControlMac.
+DATA_DIR = Path(os.getenv('SURROUNDCORE_DATA', '/data'))
+SETTINGS_PATH = DATA_DIR / 'streaming-settings.json'
+DEFAULT_SETTINGS = {
+    'source_quality': 'highest_native',
+    'prefer_lossless': True,
+    'prefer_airia': True,
+    'allow_mqa_passthrough': True,
+    'output_transport': 'auto',
+    'prefer_mhr': True,
+    'prefer_mmhr': True,
+    'allow_downsample': False,
+    'allow_downmix': False,
+    'providers': {},
+    'radio_stations': [],
+}
+
+
+def airia_available():
+    configured = os.getenv('SURROUNDCORE_AIRIA_DECODER', '').strip()
+    return bool(configured and (Path(configured).is_file() or shutil.which(configured)))
+
+
+def load_settings():
+    data = dict(DEFAULT_SETTINGS)
+    try:
+        stored = json.loads(SETTINGS_PATH.read_text())
+        if isinstance(stored, dict):
+            data.update(stored)
+    except (OSError, ValueError, TypeError):
+        pass
+    data['airia_available'] = airia_available()
+    return data
+
+
+def save_settings(update):
+    current = load_settings()
+    current.pop('airia_available', None)
+    for key in DEFAULT_SETTINGS:
+        if key in update:
+            current[key] = update[key]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_PATH.with_suffix('.tmp')
+    tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n')
+    os.chmod(tmp, 0o600)
+    tmp.replace(SETTINGS_PATH)
+    return load_settings()

@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 
 DB_PATH = os.path.join(os.getenv('SURROUNDCORE_DATA', '/data'), 'surroundcore.sqlite3')
 
@@ -40,11 +41,16 @@ CREATE TABLE IF NOT EXISTS playback_group_members (
 );
 '''
 
+@contextmanager
 def connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
-    return con
+    try:
+        yield con
+        con.commit()
+    finally:
+        con.close()
 
 def init_db():
     with connect() as con:

@@ -82,6 +82,10 @@ def capabilities():
         'max_software_volume': MAX_VOLUME,
         'control_api': 'surround-agent-v2',
         'scheduled_group_playback': True,
+        'transports': ['pcm'],
+        'mhr': False,
+        'mmhr': False,
+        'bitperfect_pcm': 'requires-device-validation',
     }
 
 
