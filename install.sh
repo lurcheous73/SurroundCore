@@ -36,6 +36,11 @@ if grep -q '^SURROUNDCORE_TOKEN=change-me$' "$ENV"; then
   sed -i "s/^SURROUNDCORE_TOKEN=.*/SURROUNDCORE_TOKEN=$TOKEN/" "$ENV"
 fi
 
+IP=$(hostname -I | awk '{print $1}')
+if grep -q '^SURROUNDCORE_PUBLIC_URL=$' "$ENV"; then
+  sed -i "s|^SURROUNDCORE_PUBLIC_URL=$|SURROUNDCORE_PUBLIC_URL=http://${IP}:8080|" "$ENV"
+fi
+
 cd /opt/surroundcore
 docker compose up -d --build
 
@@ -46,6 +51,5 @@ else
   echo "No /dev/snd: Core installed; endpoint agent left disabled."
 fi
 
-IP=$(hostname -I | awk '{print $1}')
 echo "SurroundCore API: http://${IP}:8080/docs"
 echo "Endpoint API:     http://${IP}:8090/v1/capabilities (when audio exists)"
