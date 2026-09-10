@@ -1,11 +1,20 @@
-__pycache__/
+# Runtime credentials and local state
+*.db
+*.key
+*.log
+*.p12
+*.pem
+*.pfx
 *.py[cod]
 *.sqlite3
-*.db
-.env
+*credentials*.json
+*secrets*.json
 .DS_Store
-venv/
+.env
+.env.*.local
+.env.local
 .venv/
+__pycache__/
 data/
 media/
-*.log
+venv/

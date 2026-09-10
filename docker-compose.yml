@@ -16,12 +16,15 @@ services:
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
       SURROUNDCORE_AIRIA_DECODER: ${SURROUNDCORE_AIRIA_DECODER:-}
       SURROUNDCORE_SPOTIFY_SOLOIST: ${SURROUNDCORE_SPOTIFY_SOLOIST:-/opt/spotify/soloist}
+      SURROUNDCORE_AIRPLAY_CLI: ${SURROUNDCORE_AIRPLAY_CLI:-/opt/airplay/cliairplay-linux-x86_64}
+      SURROUNDCORE_AIRPLAY_BIND_IP: ${SURROUNDCORE_AIRPLAY_BIND_IP:-}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
       - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:ro,rslave
       - ${SURROUNDCORE_CACHE:-/var/cache/surroundcore}:/cache
       - ${SURROUNDCORE_SPOTIFY_DIR:-/opt/surroundcore/spotify}:/opt/spotify:ro
+      - ${SURROUNDCORE_AIRPLAY_DIR:-/opt/surroundcore/airplay}:/opt/airplay:ro
 
   surround-ingest:
     build: ./ingest
@@ -30,16 +33,19 @@ services:
     restart: unless-stopped
     network_mode: host
     privileged: true
+    devices:
+      - /dev/sr0:/dev/sr0
+      - /dev/sg10:/dev/sg10
     environment:
       SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
       SURROUNDCORE_CORE_URL: http://127.0.0.1:8080
       SURROUNDCORE_INGEST_ROOT: /ingest
       SURROUNDCORE_INGEST_LIBRARY: /library
-      SURROUNDCORE_AUTO_RIP: ${SURROUNDCORE_AUTO_RIP:-true}
-      SURROUNDCORE_AUTO_NETMD: ${SURROUNDCORE_AUTO_NETMD:-true}
+      SURROUNDCORE_AUTO_RIP: ${SURROUNDCORE_AUTO_RIP:-false}
+      SURROUNDCORE_AUTO_NETMD: ${SURROUNDCORE_AUTO_NETMD:-false}
       SURROUNDCORE_INGEST_EJECT: ${SURROUNDCORE_INGEST_EJECT:-true}
       SURROUNDCORE_INGEST_KEEP_UPLOADS: ${SURROUNDCORE_INGEST_KEEP_UPLOADS:-false}
-      SURROUNDCORE_INGEST_POLL_SECONDS: ${SURROUNDCORE_INGEST_POLL_SECONDS:-8}
+      SURROUNDCORE_INGEST_POLL_SECONDS: ${SURROUNDCORE_INGEST_POLL_SECONDS:-60}
       SURROUNDCORE_INGEST_MAX_UPLOAD_GB: ${SURROUNDCORE_INGEST_MAX_UPLOAD_GB:-0}
       SURROUNDCORE_MAKEMKVCON: ${SURROUNDCORE_MAKEMKVCON:-/opt/makemkv/makemkvcon}
     volumes:

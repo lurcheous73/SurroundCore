@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import glob
 import hashlib
 import json
@@ -18,6 +19,8 @@ INGEST_ROOT = Path(os.getenv('SURROUNDCORE_INGEST_ROOT', '/ingest'))
 LIBRARY_ROOT = Path(os.getenv('SURROUNDCORE_INGEST_LIBRARY', '/library'))
 MAKEMKV = os.getenv('SURROUNDCORE_MAKEMKVCON', '').strip()
 NETMD_DIR = Path('/opt/surroundcore/netmd')
+MOUNT_RETRIES = max(1, int(os.getenv('SURROUNDCORE_INGEST_MOUNT_RETRIES', '3')))
+MOUNT_RETRY_SECONDS = max(0.0, float(os.getenv('SURROUNDCORE_INGEST_MOUNT_RETRY_SECONDS', '2')))
 
 
 def run(args, cwd=None, check=False, timeout=None):
@@ -37,6 +40,26 @@ def run(args, cwd=None, check=False, timeout=None):
         raise RuntimeError((p.stderr or p.stdout or 'command failed').strip())
     return p
 
+
+
+@contextlib.contextmanager
+def media_lock(timeout=5.0):
+    lock_path = INGEST_ROOT / 'state' / 'media.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open('a+')
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close(); raise RuntimeError('Media device is busy')
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN); fh.close()
 
 def safe_name(value, fallback='Unknown'):
     value = re.sub(r'[\x00-\x1f/\\:*?"<>|]+', ' ', str(value or '')).strip()
@@ -61,69 +84,105 @@ def netmd_available():
     return (NETMD_DIR / 'surroundcore-md-status.cjs').is_file() and bool(tool('node'))
 
 
+def scsi_generic_for(device):
+    name=Path(device).name
+    try: target=(Path('/sys/class/block')/name/'device').resolve()
+    except OSError: return ''
+    for sg in sorted(Path('/sys/class/scsi_generic').glob('sg*')):
+        try:
+            if (sg/'device').resolve()==target: return '/dev/'+sg.name
+        except OSError: pass
+    return ''
+
+
 def optical_devices():
-    out = []
+    out=[]
     for dev in sorted(glob.glob('/dev/sr*')):
-        name = Path(dev).name
-        sysdev = Path('/sys/class/block') / name / 'device'
-        def text(p):
-            try: return p.read_text(errors='replace').strip()
+        sysdev=Path('/sys/class/block')/Path(dev).name/'device'
+        def text(x):
+            try: return x.read_text(errors='replace').strip()
             except OSError: return ''
-        vendor, model = text(sysdev / 'vendor'), text(sysdev / 'model')
-        bus = 'unknown'
-        u = run(['udevadm', 'info', '--query=property', '--name', dev]) if tool('udevadm') else None
-        if u and u.returncode == 0:
-            for line in u.stdout.splitlines():
-                if line.startswith('ID_BUS='): bus = line.split('=', 1)[1]
-        out.append({'device': dev, 'name': safe_name(f'{vendor} {model}', name), 'bus': bus})
+        vendor,model=text(sysdev/'vendor'),text(sysdev/'model')
+        bus='usb' if '/usb' in str(sysdev.resolve()) else 'local'
+        out.append({'device':dev,'sg_device':scsi_generic_for(dev),'name':safe_name(f'{vendor} {model}',Path(dev).name),'bus':bus})
+    return out
+
+def burner_status(device):
+    devices={d['device']:d for d in optical_devices()}
+    if device not in devices:
+        return {'device':device,'available':False,'writable':False,'profiles':[],'reason':'Optical drive not found'}
+    target=devices[device].get('sg_device') or device
+    profiles=[]
+    if tool('sg_get_config'):
+        q=run(['sg_get_config',target],timeout=5)
+        text=(q.stdout or '')+'\n'+(q.stderr or '')
+        for label in ('CD-R','CD-RW','DVD-R','DVD-RW','DVD+R','DVD+RW','BD-R','BD-RE'):
+            if re.search(r'profile:\s*'+re.escape(label)+r'\b',text,re.I): profiles.append(label)
+    out=dict(devices[device]); out.update({'available':True,'writable':bool(profiles),'profiles':profiles})
+    out['reason']='write capable' if profiles else 'no writable optical profiles reported'
     return out
 
 
+def burn_image(device,image,image_kind='iso'):
+    image=Path(image)
+    if device not in {d['device'] for d in optical_devices()}: raise RuntimeError('Optical burner not found')
+    if not image.is_file(): raise RuntimeError('Burn image not found')
+    if image_kind=='iso':
+        exe=tool('xorriso'); cmd=[exe,'-as','cdrecord','-v',f'dev={device}','-eject',str(image)] if exe else None
+    elif image_kind=='cue':
+        exe=tool('cdrdao'); cmd=[exe,'write','--device',device,'--eject',str(image)] if exe else None
+    else: raise RuntimeError('Unsupported burn image type')
+    if not cmd: raise RuntimeError('Required optical burn tool is not installed')
+    q=run(cmd,timeout=60*60)
+    if q.returncode: raise RuntimeError((q.stderr or q.stdout or 'disc burn failed').strip()[-4000:])
+    return {'ok':True,'device':device,'image':image.name,'kind':image_kind,'tool':Path(exe).name}
+
 def audio_cd_info(device):
-    if not tool('cd-paranoia'):
-        return None
-    p = run(['cd-paranoia', '-d', device, '-Q'], timeout=15)
-    text = (p.stdout or '') + '\n' + (p.stderr or '')
-    if p.returncode != 0 or not re.search(r'\btrack\b|TOTAL', text, re.I):
-        return None
-    discid = ''
+    if not tool('cd-paranoia'): return None
+    q=run(['cd-paranoia','-d',device,'-Q'],timeout=15)
+    text=(q.stdout or '')+'\n'+(q.stderr or '')
+    if q.returncode!=0 or not re.search(r'\btrack\b|TOTAL',text,re.I): return None
+    discid=''
     if tool('cd-discid'):
-        d = run(['cd-discid', device], timeout=10)
-        if d.returncode == 0: discid = d.stdout.split()[0] if d.stdout.split() else ''
-    tracks = len(re.findall(r'^\s*\d+\.', text, re.M))
-    return {'kind': 'audio_cd', 'fingerprint': discid or hashlib.sha256(text.encode()).hexdigest()[:24], 'tracks': tracks}
+        d=run(['cd-discid',device],timeout=10)
+        if d.returncode==0 and d.stdout.split(): discid=d.stdout.split()[0]
+    tracks=len(re.findall(r'^\s*\d+\.',text,re.M))
+    return {'kind':'audio_cd','fingerprint':discid or hashlib.sha256(text.encode()).hexdigest()[:24],'tracks':tracks}
 
 
-def block_identity(device):
-    values = {'type':'', 'label':'', 'uuid':''}
-    if tool('blkid'):
-        p = run(['blkid', '-o', 'export', device], timeout=3)
-        if p.returncode == 0:
-            for line in p.stdout.splitlines():
-                if '=' not in line: continue
-                key, value = line.split('=', 1)
-                if key == 'TYPE': values['type'] = value
-                elif key == 'LABEL': values['label'] = value
-                elif key == 'UUID': values['uuid'] = value
-    size = run(['blockdev', '--getsize64', device], timeout=3) if tool('blockdev') else None
-    values['bytes'] = int(size.stdout.strip()) if size and size.returncode == 0 and size.stdout.strip().isdigit() else 0
-    raw = '|'.join(str(values[k]) for k in sorted(values))
-    values['fingerprint'] = hashlib.sha256(raw.encode()).hexdigest()[:24] if raw.strip('|0') else ''
+def optical_media_info(device):
+    sg=scsi_generic_for(device) or device
+    values={'profile':'','bytes':0,'sg_device':sg}
+    if tool('sg_get_config'):
+        q=run(['sg_get_config',sg],timeout=5); text=(q.stdout or '')+'\n'+(q.stderr or '')
+        m=re.search(r'Current profile:\s*(.+)',text,re.I)
+        if m: values['profile']=m.group(1).strip()
+    if tool('sg_readcap'):
+        q=run(['sg_readcap',sg],timeout=5); text=(q.stdout or '')+'\n'+(q.stderr or '')
+        m=re.search(r'Device size:\s*(\d+) bytes',text,re.I)
+        if m: values['bytes']=int(m.group(1))
+    raw=f"{values['profile']}|{values['bytes']}"
+    values['fingerprint']=hashlib.sha256(raw.encode()).hexdigest()[:24] if raw.strip('|0') else ''
     return values
 
 
-def media_identity(device):
-    # Data DVD/Blu-ray should never wait on an Audio-CD probe. Resolve the
-    # block identity first and only ask cd-paranoia for CD-sized/no-FS media.
-    info = block_identity(device)
-    if not info.get('type') and not info.get('bytes'):
-        return None
-    if info.get('type') or int(info.get('bytes') or 0) > 900_000_000:
-        return {'kind': 'data_disc', **info}
-    cd = audio_cd_info(device)
-    if cd: return cd
-    return {'kind': 'data_disc', **info}
+def block_identity(device): return optical_media_info(device)
 
+def media_identity(device):
+    info=optical_media_info(device)
+    profile=str(info.get('profile') or '').upper()
+    if profile.startswith('BD'): return {'kind':'bluray',**info}
+    if 'DVD' in profile: return {'kind':'dvd',**info}
+    if 'CD' in profile:
+        cd=audio_cd_info(device)
+        if cd:
+            cd.update({'profile':info.get('profile',''),'bytes':info.get('bytes',0),'sg_device':info.get('sg_device','')})
+            return cd
+        return {'kind':'data_disc',**info}
+    cd=audio_cd_info(device)
+    if cd: return cd
+    if info.get('profile') or info.get('bytes'): return {'kind':'data_disc',**info}
+    return None
 
 def ffprobe_streams(path):
     p = run(['ffprobe', '-v', 'error', '-print_format', 'json', '-show_streams', str(path)], timeout=60)
@@ -207,12 +266,36 @@ def extract_selected_audio(input_path, output_dir, prefix='Programme'):
 @contextlib.contextmanager
 def mounted(source):
     root = Path(tempfile.mkdtemp(prefix='mount-', dir=str(INGEST_ROOT / 'work')))
+    mounted_ok = False
     try:
-        p = run(['mount', '-o', 'ro,nosuid,nodev,loop' if Path(source).is_file() else 'ro,nosuid,nodev', str(source), str(root)])
-        if p.returncode: raise RuntimeError((p.stderr or p.stdout or 'mount failed').strip())
+        options = 'ro,nosuid,nodev,loop' if Path(source).is_file() else 'ro,nosuid,nodev'
+        last_error = 'mount failed'
+        for attempt in range(1, MOUNT_RETRIES + 1):
+            try:
+                proc = run(['mount', '-o', options, str(source), str(root)], timeout=20)
+                if proc.returncode == 0:
+                    mounted_ok = True
+                    break
+                last_error = (proc.stderr or proc.stdout or 'mount failed').strip()
+            except Exception as exc:
+                last_error = str(exc)
+            if attempt < MOUNT_RETRIES and MOUNT_RETRY_SECONDS:
+                time.sleep(MOUNT_RETRY_SECONDS)
+        if not mounted_ok:
+            sevenzip = tool('7z') or tool('7zz')
+            if not sevenzip:
+                raise RuntimeError(f'mount failed after {MOUNT_RETRIES} attempts: {last_error}; 7-Zip fallback unavailable')
+            proc = run([sevenzip, 'x', '-y', '-bd', f'-o{root}', str(source)], timeout=None)
+            if proc.returncode:
+                detail = (proc.stderr or proc.stdout or '7-Zip extraction failed').strip()
+                raise RuntimeError(f'mount failed ({last_error}); userspace extraction failed: {detail}')
         yield root
     finally:
-        run(['umount', '-l', str(root)])
+        if mounted_ok:
+            try:
+                run(['umount', '-l', str(root)], timeout=20)
+            except Exception:
+                pass
         shutil.rmtree(root, ignore_errors=True)
 
 def init_dirs():
@@ -330,7 +413,7 @@ def makemkv_best_title(source):
     return max(titles, key=titles.get)
 
 
-def process_makemkv(source, outdir):
+def process_makemkv(source, outdir, prefix='Disc Programme'):
     exe = tool('makemkvcon'); title = makemkv_best_title(source)
     work = Path(tempfile.mkdtemp(prefix='makemkv-', dir=str(INGEST_ROOT / 'work')))
     try:
@@ -338,7 +421,7 @@ def process_makemkv(source, outdir):
         if p.returncode: raise RuntimeError((p.stderr or p.stdout or 'MakeMKV extraction failed').strip())
         mkvs = sorted(work.glob('*.mkv'), key=lambda x: x.stat().st_size, reverse=True)
         if not mkvs: raise RuntimeError('MakeMKV produced no title file')
-        return extract_selected_audio(mkvs[0], outdir, 'Blu-ray Programme')
+        return extract_selected_audio(mkvs[0], outdir, prefix)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -403,16 +486,22 @@ def process_bin(bin_path, cue_path=None, label=None):
         shutil.rmtree(work, ignore_errors=True)
 
 def process_physical(device):
-    identity = media_identity(device)
+    identity=media_identity(device)
     if not identity: raise RuntimeError('No readable media in optical drive')
-    label = identity.get('label') or Path(device).name
-    if identity['kind'] == 'audio_cd':
-        return rip_audio_cd(device, 'Audio CD', identity.get('fingerprint',''))
-    with mounted(device) as root:
-        mk_source = None
-        if (root/'BDMV').is_dir() and makemkv_available() and len(optical_devices()) == 1:
-            mk_source = 'disc:0'
-        return process_mounted(root, label or 'Optical Disc', identity.get('fingerprint',''), mk_source)
+    if identity['kind']=='audio_cd':
+        return rip_audio_cd(device,'Audio CD',identity.get('fingerprint',''))
+    if identity['kind'] in ('dvd','bluray'):
+        if not makemkv_available(): raise RuntimeError('DVD/Blu-ray requires MakeMKV on this Core')
+        label='Blu-ray Disc' if identity['kind']=='bluray' else 'DVD Disc'
+        outdir=album_dir(label,identity.get('fingerprint',''))
+        try:
+            outputs=process_makemkv('disc:0',outdir,label+' Programme')
+            kind=identity['kind']+'_makemkv'
+            write_manifest(outdir,{'source':kind,'device':device,'fingerprint':identity.get('fingerprint',''),'outputs':outputs})
+            return {'kind':kind,'output_dir':str(outdir),'outputs':outputs}
+        except Exception:
+            shutil.rmtree(outdir,ignore_errors=True); raise
+    raise RuntimeError('Unsupported optical media profile; create an ISO backup for inspection')
 
 
 def _netmd_status_unlocked():

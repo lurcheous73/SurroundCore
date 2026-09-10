@@ -144,6 +144,8 @@ DEFAULT_SETTINGS = {
     'prefer_airia': True,
     'allow_mqa_passthrough': True,
     'output_transport': 'auto',
+    'output_transports': {},
+    'meridian_models': {},
     'prefer_mhr': True,
     'prefer_mmhr': True,
     'allow_downsample': False,

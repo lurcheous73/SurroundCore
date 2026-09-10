@@ -1,18 +1,25 @@
 import hmac
+import concurrent.futures
 import json
 import os
+import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
+import httpx
 from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import Response, HTMLResponse, StreamingResponse
+from fastapi.responses import Response, HTMLResponse, StreamingResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
-from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
+from .sonos import (endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume,
+                    stop as sonos_stop, seek as sonos_seek, play as sonos_resume, pause as sonos_pause,
+                    get_volume as sonos_get_volume, set_mute as sonos_set_mute, get_mute as sonos_get_mute, state as sonos_state)
 from .mdns_endpoints import endpoints as mdns_endpoints
-from .upnp import endpoints as upnp_endpoints
+from .upnp import (endpoints as upnp_endpoints, play_uri as upnp_play_uri, pause as upnp_pause,
+                   resume as upnp_resume, stop as upnp_stop, seek as upnp_seek, state as upnp_state,
+                   set_volume as upnp_set_volume, set_mute as upnp_set_mute)
 from .media import scan
 from .streaming import (ranged_file, stereo_flac_cache, stereo_flac_program_cache,
                         load_settings, save_settings, load_provider_secrets, save_provider_secret)
@@ -29,9 +36,16 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
                  save_group, list_groups, get_group, delete_group, update_group_latency,
                  save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
-from . import sessions
+from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols
 
 app = FastAPI(title='SurroundCore', version='0.5.0-dev')
+
+_ENDPOINT_CACHE={'at':0.0,'items':[]}
+_ENDPOINT_CACHE_LOCK=threading.Lock()
+_ENDPOINT_CACHE_SECONDS=10.0
+_RADIO_META={}
+_RADIO_META_LOCK=threading.Lock()
+_RADIO_ACTIVE={}
 
 
 class EndpointRegistration(BaseModel):
@@ -96,11 +110,31 @@ class StreamingSettingsUpdate(BaseModel):
     allow_downsample: Optional[bool] = None
     allow_downmix: Optional[bool] = None
     providers: Optional[dict] = None
+    output_transports: Optional[dict] = None
+
+
+class MeridianModelInput(BaseModel):
+    model: str
+
+class OutputTransportInput(BaseModel):
+    host: str
+    transport: str
 
 
 class RadioStationInput(BaseModel):
     name: str
     url: str
+    favicon: Optional[str] = None
+    country: Optional[str] = None
+    countrycode: Optional[str] = None
+    codec: Optional[str] = None
+    bitrate: Optional[int] = None
+    tags: Optional[str] = None
+    directory_id: Optional[str] = None
+
+
+class RadioLocationInput(BaseModel):
+    postcode: str
 
 
 class PlaybackURLInput(BaseModel):
@@ -129,7 +163,7 @@ class PodcastFeedInput(BaseModel):
 
 class SpotifyConfigInput(BaseModel):
     api_key: str
-    binary: str = '/opt/spotify/soloist'
+    binary: str = '/data/spotify/bin/soloist'
     device_name: str = 'SurroundCore Spotify'
     ws: str = '127.0.0.1:9090'
     data_dir: str = '/data/spotify'
@@ -181,9 +215,50 @@ class LibrarySourceRequest(BaseModel):
     enabled: bool = True
 
 
+class WebLoginInput(BaseModel):
+    username: str
+    password: str
+
+
+class WebBootstrapInput(BaseModel):
+    username: str
+    display_name: str
+    password: str
+
+
+class WebUserInput(BaseModel):
+    username: Optional[str] = None
+    display_name: Optional[str] = None
+    password: Optional[str] = None
+    role: Optional[str] = 'user'
+    enabled: Optional[bool] = True
+    zones: list[str] = Field(default_factory=list)
+
+
+class QueueInput(BaseModel):
+    media_ids: list[int] = Field(default_factory=list)
+
+
+class QueueAddInput(BaseModel):
+    media_id: int
+
+
 @app.on_event('startup')
 def startup():
     init_db()
+    userauth.init_auth_db()
+    try:
+        cfg=(load_provider_secrets().get('spotify') or {})
+        if cfg.get('api_key') and spotify_soloist.binary(cfg):
+            spotify_soloist.start_daemon(cfg)
+    except Exception:
+        pass
+
+
+@app.on_event('shutdown')
+def shutdown():
+    airplay.stop_all()
+    spotify_soloist.stop_daemon()
 
 
 @app.get('/api/v1/health')
@@ -191,28 +266,314 @@ def health():
     return {'ok': True, 'service': 'SurroundCore', 'version': '0.5.0-dev'}
 
 
-@app.get('/setup/streaming', response_class=HTMLResponse)
-def streaming_setup():
+@app.get('/', response_class=HTMLResponse)
+def web_dashboard():
     return HTMLResponse(streaming_setup_html())
 
 
-def _require_token(authorization=None, token=None):
+@app.get('/setup/streaming')
+def streaming_setup():
+    return RedirectResponse('/', status_code=307)
+
+
+def _supplied_token(authorization=None, token=None):
+    return token or (authorization[7:] if authorization and authorization.startswith('Bearer ') else '')
+
+
+def _auth_context(authorization=None, token=None):
+    supplied = _supplied_token(authorization, token)
     expected = os.getenv('SURROUNDCORE_TOKEN', '')
-    supplied = token or (authorization[7:] if authorization and authorization.startswith('Bearer ') else '')
-    if not expected or not hmac.compare_digest(expected, supplied):
-        raise HTTPException(401, 'Invalid SurroundCore token')
-    return expected
+    if expected and supplied and hmac.compare_digest(expected, supplied):
+        return {'id': 0, 'username': 'core-admin', 'display_name': 'Core Admin', 'role': 'admin',
+                'enabled': True, 'zones': [], 'master': True}, supplied
+    user = userauth.session_user(supplied)
+    if user:
+        user = dict(user); user['master'] = False
+        return user, supplied
+    raise HTTPException(401, 'Invalid or expired SurroundCore session')
 
 
-def _all_endpoints():
-    combined = {e['id']: e for e in list_endpoints()}
-    for discover in (sonos_endpoints, mdns_endpoints, upnp_endpoints):
-        try:
-            for endpoint in discover():
-                combined[endpoint['id']] = endpoint
-        except Exception:
-            pass
-    return list(combined.values())
+def _require_token(authorization=None, token=None):
+    _user, supplied = _auth_context(authorization, token)
+    return supplied
+
+
+def _require_admin(authorization=None, token=None):
+    user, supplied = _auth_context(authorization, token)
+    if user.get('role') != 'admin':
+        raise HTTPException(403, 'Administrator access required')
+    return user, supplied
+
+
+def _zone_parent_id(zone_id):
+    return str(zone_id or '').split('::', 1)[0]
+
+
+def _require_zone(endpoint_id, authorization=None, token=None):
+    user, supplied = _auth_context(authorization, token)
+    parent = _zone_parent_id(endpoint_id)
+    if user.get('role') != 'admin' and not (userauth.zone_allowed(user, endpoint_id) or userauth.zone_allowed(user, parent)):
+        raise HTTPException(403, 'This user is not allowed to control that zone')
+    return user, supplied
+
+
+
+def _agent_token():
+    token = os.getenv('SURROUNDCORE_TOKEN', '')
+    if not token:
+        raise HTTPException(500, 'Core agent token is not configured')
+    return token
+
+
+def _visible_endpoints(user):
+    items = _all_endpoints()
+    if user.get('role') == 'admin':
+        return items
+    allowed = set(user.get('zones') or [])
+    return [e for e in items if e.get('id') in allowed]
+
+
+
+def _endpoint_host(endpoint):
+    address = str(endpoint.get('address') or '')
+    if '://' in address:
+        return urllib.parse.urlparse(address).hostname or address
+    return address.split(':', 1)[0] if address else ''
+
+
+def _local_zone_name(device, index):
+    kind=str(device.get('output_type') or 'audio').lower()
+    base={'hdmi':'HDMI','usb-audio':'USB DAC','analog':'Soundcard','spdif':'S/PDIF','aes3':'AES/EBU','i2s':'I²S'}.get(kind, kind.upper())
+    desc=str(device.get('description') or '')
+    family=str(device.get('device_family') or '')
+    if family and family not in ('Generic ALSA','USB Audio Class'):
+        return family + (f' · {base}' if base not in family else '')
+    label=''
+    if '[' in desc and ']' in desc:
+        label=desc.split('[',1)[1].split(']',1)[0].strip()
+    return base + (f' · {label}' if label and label.casefold()!=base.casefold() else '')
+
+
+def _logical_zones(user):
+    prefs=load_settings().get('output_transports') or {}
+    zones=[]; groups={}
+    for endpoint in _visible_endpoints(user):
+        if endpoint.get('kind')=='alsa' and (endpoint.get('capabilities') or {}).get('devices'):
+            for i,dev in enumerate(endpoint['capabilities']['devices']):
+                device=dev.get('raw_alsa') or dev.get('alsa') or f'device-{i}'
+                zones.append({'id':f"{endpoint['id']}::{device}",'endpoint_id':endpoint['id'],'device':device,'name':_local_zone_name(dev,i),'address':'local','kind':'alsa','transports':['alsa'],'playable':bool(endpoint.get('address')),'local':True,'endpoints':[endpoint]})
+            continue
+        host=_endpoint_host(endpoint); name=str(endpoint.get('name') or endpoint.get('id') or 'Zone'); base=name.removesuffix(' (L)').removesuffix(' (R)')
+        key=host or base.casefold(); groups.setdefault(key,{'name':base,'host':host,'key':key,'endpoints':[]})['endpoints'].append(endpoint)
+    for group in groups.values():
+        wanted=prefs.get(group['key'])
+        eps=sorted(group['endpoints'],key=lambda e:(0 if wanted and e.get('kind')==wanted else 1, protocols.rank(e.get('kind'))))
+        preferred=eps[0]; kinds=[]
+        for e in eps:
+            if e.get('kind') not in kinds:kinds.append(e.get('kind'))
+        local=preferred.get('kind') in ('alsa','meridian'); pcaps=preferred.get('capabilities') or {}
+        playable=preferred.get('kind') in ('alsa','airplay','sonos','upnp','cast','meridian') and not bool(pcaps.get('discovered_only'))
+        if preferred.get('kind')=='alsa' and not (pcaps.get('devices') or []): playable=False
+        options=[protocols.describe(k) for k in kinds]
+        zones.append({'id':preferred.get('id'),'endpoint_id':preferred.get('id'),'device':'default','name':group['name'],'address':'local' if local else group['host'],'kind':preferred.get('kind'),'transports':kinds,'transport_options':options,'transport_preference':wanted or preferred.get('kind'),'transport_key':group['key'],'playable':playable,'local':local,'endpoints':eps})
+    return sorted(zones,key=lambda z:z['name'].casefold())
+
+
+@app.get('/api/v1/auth/state')
+def auth_state():
+    return {'configured': userauth.count_users() > 0, 'master_key_available': bool(os.getenv('SURROUNDCORE_TOKEN', ''))}
+
+
+@app.post('/api/v1/auth/login')
+def auth_login(item: WebLoginInput):
+    try:
+        result = userauth.authenticate(item.username, item.password)
+    except ValueError:
+        result = None
+    if not result:
+        raise HTTPException(401, 'Invalid username or password')
+    token, user, expires = result
+    return {'ok': True, 'token': token, 'expires_at': expires, 'user': user}
+
+
+@app.post('/api/v1/auth/bootstrap')
+def auth_bootstrap(item: WebBootstrapInput, authorization: str | None = Header(default=None)):
+    user, _token = _require_admin(authorization)
+    if not user.get('master'):
+        raise HTTPException(403, 'The Core master key is required for bootstrap')
+    if userauth.count_users():
+        raise HTTPException(409, 'Web users are already configured')
+    try:
+        created = userauth.create_user(item.username, item.display_name, item.password, role='admin')
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {'ok': True, 'user': created}
+
+
+@app.get('/api/v1/auth/me')
+def auth_me(authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    return {'user': user, 'zones': _visible_endpoints(user)}
+
+
+@app.post('/api/v1/auth/logout')
+def auth_logout(authorization: str | None = Header(default=None)):
+    supplied = _supplied_token(authorization)
+    expected = os.getenv('SURROUNDCORE_TOKEN', '')
+    if expected and supplied and hmac.compare_digest(expected, supplied):
+        return {'ok': True, 'master': True}
+    return {'ok': userauth.logout(supplied)}
+
+
+@app.get('/api/v1/admin/users')
+def admin_users(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {'users': userauth.list_users(), 'zones': _all_endpoints()}
+
+
+@app.post('/api/v1/admin/users')
+def admin_user_create(item: WebUserInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    if not item.username or not item.password:
+        raise HTTPException(400, 'username and password are required')
+    if userauth.find_user(item.username):
+        raise HTTPException(409, 'User already exists')
+    try:
+        user = userauth.create_user(item.username, item.display_name or item.username, item.password, item.role or 'user')
+        userauth.update_user(user['id'], enabled=item.enabled)
+        userauth.set_user_zones(user['id'], item.zones)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {'ok': True, 'user': userauth.get_user(user['id'])}
+
+
+@app.put('/api/v1/admin/users/{user_id}')
+def admin_user_update(user_id: int, item: WebUserInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    try:
+        user = userauth.update_user(user_id, item.display_name, item.password, item.role, item.enabled)
+        if not user:
+            raise HTTPException(404, 'User not found')
+        userauth.set_user_zones(user_id, item.zones)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {'ok': True, 'user': userauth.get_user(user_id)}
+
+
+@app.delete('/api/v1/admin/users/{user_id}')
+def admin_user_delete(user_id: int, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    if not userauth.delete_user(user_id):
+        raise HTTPException(404, 'User not found')
+    return {'ok': True}
+
+
+def _queue_view(user, endpoint_id):
+    if user.get('role') != 'admin' and not userauth.zone_allowed(user, endpoint_id):
+        raise HTTPException(403, 'This user is not allowed to use that zone')
+    if user.get('master'):
+        return {'endpoint_id': endpoint_id, 'media_ids': [], 'items': [], 'persistent': False}
+    ids = userauth.queue_get(user['id'], endpoint_id)
+    items=[]
+    for media_id in ids:
+        item=get_media(media_id)
+        if item:
+            items.append(item)
+    return {'endpoint_id': endpoint_id, 'media_ids': ids, 'items': items, 'persistent': True}
+
+
+@app.get('/api/v1/me/queue/{endpoint_id}')
+def my_queue(endpoint_id: str, authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    return _queue_view(user, endpoint_id)
+
+
+@app.put('/api/v1/me/queue/{endpoint_id}')
+def my_queue_save(endpoint_id: str, item: QueueInput, authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    if user.get('master'):
+        raise HTTPException(409, 'Create a web admin account to use persistent personal queues')
+    _require_zone(endpoint_id, authorization)
+    for media_id in item.media_ids:
+        if not get_media(media_id): raise HTTPException(404, f'Media {media_id} not found')
+    userauth.queue_save(user['id'], endpoint_id, item.media_ids)
+    return _queue_view(user, endpoint_id)
+
+
+@app.post('/api/v1/me/queue/{endpoint_id}/items')
+def my_queue_add(endpoint_id: str, item: QueueAddInput, authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    if user.get('master'):
+        raise HTTPException(409, 'Create a web admin account to use persistent personal queues')
+    _require_zone(endpoint_id, authorization)
+    if not get_media(item.media_id): raise HTTPException(404, 'Media not found')
+    userauth.queue_append(user['id'], endpoint_id, item.media_id)
+    return _queue_view(user, endpoint_id)
+
+
+@app.delete('/api/v1/me/queue/{endpoint_id}/items/{index}')
+def my_queue_remove(endpoint_id: str, index: int, authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    if user.get('master'):
+        raise HTTPException(409, 'Create a web admin account to use persistent personal queues')
+    _require_zone(endpoint_id, authorization)
+    try:
+        userauth.queue_remove(user['id'], endpoint_id, index)
+    except IndexError:
+        raise HTTPException(404, 'Queue item not found')
+    return _queue_view(user, endpoint_id)
+
+
+
+INGEST_URL = os.getenv('SURROUNDCORE_INGEST_URL', 'http://127.0.0.1:8082').rstrip('/')
+
+
+@app.api_route('/api/v1/ingest/{ingest_path:path}', methods=['GET', 'POST', 'DELETE'])
+async def ingest_proxy(ingest_path: str, request: Request, authorization: str | None = Header(default=None)):
+    _admin, token = _require_admin(authorization)
+    body = await request.body()
+    headers = {'Authorization': f'Bearer {token}'}
+    content_type = request.headers.get('content-type')
+    if content_type:
+        headers['Content-Type'] = content_type
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            upstream = await client.request(
+                request.method, f'{INGEST_URL}/api/v1/ingest/{ingest_path}',
+                params=list(request.query_params.multi_items()), headers=headers, content=body)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f'Ingest service unavailable: {exc}')
+    response_type = (upstream.headers.get('content-type') or 'application/json').split(';', 1)[0]
+    return Response(content=upstream.content, status_code=upstream.status_code, media_type=response_type)
+
+
+def _all_endpoints(force=False):
+    with _ENDPOINT_CACHE_LOCK:
+        if not force and time.time()-_ENDPOINT_CACHE['at'] < _ENDPOINT_CACHE_SECONDS:
+            return [dict(x) for x in _ENDPOINT_CACHE['items']]
+    combined={e['id']:e for e in list_endpoints()}
+    jobs=[('meridian',lambda:meridian_discovery.endpoints(force=force)),('sonos',sonos_endpoints),('mdns',mdns_endpoints),('upnp',upnp_endpoints)]
+    pool=concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    futures={pool.submit(fn):name for name,fn in jobs}
+    done,_=concurrent.futures.wait(futures,timeout=5.5)
+    for future in done:
+        try: items=future.result()
+        except Exception: continue
+        for endpoint in items:
+            current=combined.get(endpoint['id'])
+            if current and endpoint.get('kind')=='meridian':
+                caps=dict(endpoint.get('capabilities') or {}); caps.update(current.get('capabilities') or {})
+                merged=dict(endpoint); merged.update(current); merged['capabilities']=caps; combined[endpoint['id']]=merged
+            else: combined[endpoint['id']]=endpoint
+    pool.shutdown(wait=False,cancel_futures=True)
+    overrides=load_settings().get('meridian_models') or {}
+    for endpoint in combined.values():
+        if endpoint.get('kind')=='meridian':
+            caps=dict(endpoint.get('capabilities') or {}); caps['model']=overrides.get(endpoint.get('id')) or caps.get('model') or 'Meridian / Sooloos'; endpoint['capabilities']=caps
+    result=list(combined.values())
+    with _ENDPOINT_CACHE_LOCK:
+        _ENDPOINT_CACHE['at']=time.time(); _ENDPOINT_CACHE['items']=[dict(x) for x in result]
+    return result
 
 
 def _public_url():
@@ -244,6 +605,115 @@ def _post_json(url, body, token):
         return json.loads(response.read().decode() or '{}')
 
 
+def _playback_endpoint(endpoint_id):
+    endpoint = next((e for e in _all_endpoints() if e.get('id') == endpoint_id), None)
+    if not endpoint:
+        raise HTTPException(404, 'Playback endpoint not found')
+    return endpoint
+
+
+def _programme_url(media_ids, token):
+    ids=','.join(str(int(x)) for x in media_ids)
+    return f'{_public_url()}/api/v1/programmes/stereo.flac?media_ids={ids}&token={urllib.parse.quote(token, safe="")}'
+
+
+def _radio_relay_sig(station_id, exp):
+    key=os.getenv('SURROUNDCORE_TOKEN','').encode()
+    return hmac.new(key,f'{station_id}:{int(exp)}'.encode(),'sha256').hexdigest()
+
+def _radio_relay_url(station_id):
+    exp=int(time.time())+7*24*3600
+    sig=_radio_relay_sig(station_id,exp)
+    return f'{_public_url()}/api/v1/radio/relay/{urllib.parse.quote(str(station_id),safe="")}?exp={exp}&sig={sig}'
+
+def _radio_is_hls(url):
+    return '.m3u8' in str(url).lower()
+
+
+def _radio_meta_update(station_id, title):
+    title=str(title or '').strip()
+    if not title:return
+    with _RADIO_META_LOCK:_RADIO_META[str(station_id)]={'title':title,'updated_at':time.time()}
+
+def _radio_meta_get(station_id):
+    with _RADIO_META_LOCK:item=dict(_RADIO_META.get(str(station_id)) or {})
+    return item if item and time.time()-item.get('updated_at',0)<180 else {}
+
+
+def _external_media(title, url):
+    return {'id': None, 'path': url, 'codec': 'stream', 'channels': 2, 'sample_rate': 0,
+            'bit_depth': 0, 'duration': 0.0, 'metadata': {'title': title or 'Stream'}}
+
+
+def _play_external(endpoint, url, device='default', volume=None, title='Stream', source='stream'):
+    kind=endpoint.get('kind')
+    endpoint_id=endpoint.get('id')
+    if kind=='sonos':
+        if volume is not None: sonos_set_volume(endpoint, round(max(0.0,min(float(volume),1.0))*100))
+        sonos_uri=url
+        if source=='radio' and url.startswith('http://') and not _radio_is_hls(url): sonos_uri='x-rincon-mp3radio://'+url[7:]
+        sonos_play_uri(endpoint,sonos_uri)
+        v=sonos_get_volume(endpoint)
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'sonos-native','transport':'sonos','source_url':url,'transport_uri':sonos_uri})
+        return {'ok':True,'transport':'sonos','volume':v,'session':session}
+    if kind=='airplay':
+        media=_external_media(title,url)
+        result=airplay.play(endpoint,url,media,0.0,0.35 if volume is None else volume)
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'airplay-native-realtime','transport':'airplay2'})
+        return {'ok':True,'transport':'airplay2','result':result,'session':session}
+    if kind=='upnp':
+        upnp_play_uri(endpoint,url)
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'upnp-native','transport':'upnp','source_url':url})
+        return {'ok':True,'transport':'upnp','session':session}
+    if kind=='cast':
+        result=cast_driver.play_uri(endpoint,url,title=title,stream_type='LIVE' if source=='radio' else 'BUFFERED')
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'cast-native','transport':'cast','source_url':url})
+        return {'ok':True,'transport':'cast','result':result,'session':session}
+    if kind=='upnp':
+        upnp_play_uri(endpoint,url)
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'upnp-native','transport':'upnp','source_url':url})
+        return {'ok':True,'transport':'upnp','session':session}
+    if kind=='cast':
+        result=cast_driver.play_uri(endpoint,url,title=title,stream_type='LIVE' if source=='radio' else 'BUFFERED')
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'cast-native','transport':'cast','source_url':url})
+        return {'ok':True,'transport':'cast','result':result,'session':session}
+    if kind in ('alsa','meridian') and endpoint.get('address'):
+        result=play_url(endpoint_id,url,device)
+        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                        {'mode':'endpoint-native','transport':kind})
+        return {'ok':True,'transport':kind,'result':result,'session':session}
+    raise RuntimeError(f'{kind or "unknown"} playback is not wired yet')
+
+
+def _play_compat_programme(endpoint, media, media_ids, token, volume=0.35, position_seconds=0.0):
+    endpoint_id=endpoint['id']; url=_programme_url(media_ids,token); kind=endpoint.get('kind')
+    total=sum(float(x.get('duration') or 0) for x in media)
+    plan={'mode':'compatibility-programme','transport':kind,'render':{'codec':'flac','sample_rate':48000,'bit_depth':16,'channels':2},'tracks':len(media)}
+    if kind=='sonos':
+        sonos_play_uri(endpoint,url)
+        if position_seconds>0: sonos_seek(endpoint,position_seconds)
+        result={'transport':'sonos','volume':sonos_get_volume(endpoint),'url':url}
+    elif kind=='airplay':
+        synthetic={'id':'programme:'+','.join(map(str,media_ids)),'path':url,'codec':'flac','channels':2,'sample_rate':48000,'bit_depth':16,'duration':total,'metadata':{'title':'SurroundCore Queue'}}
+        result=airplay.play(endpoint,url,synthetic,position_seconds,volume)
+    elif kind=='upnp':
+        upnp_play_uri(endpoint,url)
+        if position_seconds>0: upnp_seek(endpoint,position_seconds)
+        result={'transport':'upnp','url':url}
+    elif kind=='cast':
+        result=cast_driver.play_uri(endpoint,url,content_type='audio/flac',title='SurroundCore Queue',stream_type='BUFFERED',position_seconds=position_seconds)
+    else:
+        raise RuntimeError('Compatibility programme transport unsupported')
+    session=sessions.start_library(endpoint_id,media,position_seconds=position_seconds,plan=plan)
+    return {'ok':True,'endpoint':endpoint_id,'plan':plan,'session':session,'result':result}
+
+
 _group_playback = GroupPlayback(_public_url, _post_json)
 
 
@@ -256,7 +726,7 @@ def streaming_overview(authorization: str | None = Header(default=None)):
 
 @app.get('/api/v1/streaming/route/{endpoint_id}')
 def streaming_route(endpoint_id: str, channels: int = Query(default=2, ge=1, le=32), authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(endpoint_id, authorization)
     endpoint = next((e for e in _all_endpoints() if e.get('id') == endpoint_id), None)
     if not endpoint:
         raise HTTPException(404, 'Endpoint not found')
@@ -266,43 +736,152 @@ def streaming_route(endpoint_id: str, channels: int = Query(default=2, ge=1, le=
 
 @app.post('/api/v1/streaming/settings')
 def streaming_settings(item: StreamingSettingsUpdate, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     update = {k: v for k, v in item.model_dump().items() if v is not None}
     settings = save_settings(update)
     return {'settings': settings, 'quality': quality_policy(settings)}
 
 
+@app.get('/api/v1/radio/popular')
+def radio_popular(limit: int = Query(default=40, ge=1, le=100), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        return {'stations': radio_browser.popular(limit)}
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get('/api/v1/radio/search')
+def radio_search(name: str = '', country: str = '', language: str = '', tag: str = '', limit: int = Query(default=60, ge=1, le=100), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        location=load_settings().get('radio_location') or {}
+        return {'stations': radio_browser.search_local_first(name=name, country=country, language=language, tag=tag, location=location, limit=limit), 'local_first': bool(location)}
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get('/api/v1/radio/location')
+def radio_location(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return {'location': load_settings().get('radio_location')}
+
+
+@app.post('/api/v1/radio/location')
+def radio_location_save(item: RadioLocationInput, limit: int = Query(default=40, ge=1, le=100), authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    try:
+        location=radio_browser.resolve_postcode(item.postcode)
+        stations=radio_browser.nearby(location['lat'], location['lon'], location.get('countrycode') or '', limit)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+    save_settings({'radio_location': location})
+    return {'location': location, 'stations': stations}
+
+
+@app.get('/api/v1/radio/nearby')
+def radio_nearby(limit: int = Query(default=40, ge=1, le=100), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    location=load_settings().get('radio_location') or {}
+    if location.get('lat') is None or location.get('lon') is None:
+        raise HTTPException(409, 'Set a postcode / ZIP under Streaming → Internet Radio first')
+    try:
+        return {'location': location, 'stations': radio_browser.nearby(location['lat'], location['lon'], location.get('countrycode') or '', limit)}
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
 @app.post('/api/v1/streaming/radio')
 def add_radio(item: RadioStationInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     parsed = urllib.parse.urlparse(item.url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         raise HTTPException(400, 'Radio URL must be http or https')
     settings = load_settings()
     stations = list(settings.get('radio_stations') or [])
-    stations.append({'id': uuid.uuid4().hex[:12], 'name': item.name.strip(), 'url': item.url.strip()})
+    data={'name':item.name.strip(),'url':item.url.strip()}
+    for field in ('favicon','country','countrycode','codec','bitrate','tags','directory_id'):
+        value=getattr(item,field,None)
+        if value not in (None,''): data[field]=value
+    existing=next((station for station in stations if station.get('url') == data['url']), None)
+    if existing:
+        existing.update(data)
+    else:
+        data['id']=uuid.uuid4().hex[:12]
+        stations.append(data)
     settings = save_settings({'radio_stations': stations})
     return {'radio_stations': settings['radio_stations']}
 
 
 @app.delete('/api/v1/streaming/radio/{station_id}')
 def delete_radio(station_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     settings = load_settings()
     stations = [station for station in settings.get('radio_stations', []) if station.get('id') != station_id]
     settings = save_settings({'radio_stations': stations})
     return {'radio_stations': settings['radio_stations']}
 
 
+@app.get('/api/v1/radio/relay/{station_id}')
+def radio_relay(station_id: str, exp: int = Query(), sig: str = Query()):
+    if exp < int(time.time()) or not hmac.compare_digest(sig,_radio_relay_sig(station_id,exp)):
+        raise HTTPException(401,'Expired or invalid radio relay link')
+    station=next((x for x in load_settings().get('radio_stations',[]) if x.get('id')==station_id),None)
+    if not station: raise HTTPException(404,'Radio station not found')
+    req=urllib.request.Request(station['url'],headers={'User-Agent':'SurroundCore/0.5','Icy-MetaData':'1'})
+    try: upstream=urllib.request.urlopen(req,timeout=10)
+    except Exception as exc: raise HTTPException(502,f'Radio upstream failed: {exc}')
+    ctype=upstream.headers.get('Content-Type') or 'audio/mpeg'
+    headers={}
+    for key in ('icy-metaint','icy-name','icy-br','icy-genre','icy-url'):
+        value=upstream.headers.get(key)
+        if value: headers[key]=value
+    metaint=int(upstream.headers.get('icy-metaint') or 0)
+    def body():
+        try:
+            if not metaint:
+                while True:
+                    chunk=upstream.read(65536)
+                    if not chunk: break
+                    yield chunk
+                return
+            while True:
+                remain=metaint
+                while remain:
+                    chunk=upstream.read(min(65536,remain))
+                    if not chunk:return
+                    remain-=len(chunk); yield chunk
+                marker=upstream.read(1)
+                if not marker:return
+                yield marker
+                mlen=marker[0]*16
+                if mlen:
+                    meta=upstream.read(mlen)
+                    if not meta:return
+                    yield meta
+                    text=meta.rstrip(b'\x00').decode('utf-8','replace')
+                    for part in text.split(';'):
+                        if part.startswith("StreamTitle='") and part.endswith("'"):
+                            _radio_meta_update(station_id,part[13:-1]); break
+        finally: upstream.close()
+    return StreamingResponse(body(),media_type=ctype,headers=headers)
+
+
 @app.post('/api/v1/streaming/play')
 def streaming_play(item: ProviderPlayInput, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
+    _user, token = _require_zone(item.endpoint_id, authorization)
+    endpoint=_playback_endpoint(item.endpoint_id)
     settings = load_settings()
+    title = item.provider.replace('_',' ').title()
     if item.provider == 'internet_radio':
         station = next((station for station in settings.get('radio_stations', []) if station.get('id') == item.item_id), None)
         if not station:
             raise HTTPException(404, 'Radio station not found')
-        url = station['url']
+        url = station['url']; title = station.get('name') or title
+        _RADIO_ACTIVE[item.endpoint_id]=station.get('id')
+        if endpoint.get('kind') in ('sonos','upnp') and not _radio_is_hls(url): url=_radio_relay_url(station.get('id'))
     elif item.provider == 'bandcamp':
         config = load_provider_secrets().get('bandcamp')
         if not config:
@@ -323,30 +902,30 @@ def streaming_play(item: ProviderPlayInput, authorization: str | None = Header(d
         episode = next((episode for episode in parsed['episodes'] if episode.get('id') == episode_id), None)
         if not episode:
             raise HTTPException(404, 'Podcast episode not found')
-        url = episode['url']
+        url = episode['url']; title = episode.get('title') or title
     else:
         raise HTTPException(501, f'{item.provider} playback module is not installed')
     try:
-        return play_url(item.endpoint_id, url, item.device)
+        return _play_external(endpoint, url, item.device, None, title, 'radio' if item.provider=='internet_radio' else item.provider)
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
 
 @app.post('/api/v1/playback/url')
 def playback_url(item: PlaybackURLInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(item.endpoint_id, authorization)
     parsed = urllib.parse.urlparse(item.url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         raise HTTPException(400, 'Playback URL must be http or https')
     try:
-        return play_url(item.endpoint_id, item.url, item.device)
+        return _play_external(_playback_endpoint(item.endpoint_id), item.url, item.device, None, 'Internet Radio', 'radio')
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
 
 @app.post('/api/v1/playback/{endpoint_id}/stop')
 def playback_stop(endpoint_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(endpoint_id, authorization)
     try:
         return stop_endpoint(endpoint_id)
     except Exception as exc:
@@ -355,11 +934,37 @@ def playback_stop(endpoint_id: str, authorization: str | None = Header(default=N
 
 @app.get('/api/v1/playback/{endpoint_id}/status')
 def playback_status(endpoint_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(endpoint_id, authorization)
+    endpoint=_playback_endpoint(endpoint_id)
     try:
+        if endpoint.get('kind')=='sonos':
+            data=sonos_state(endpoint); sid=_RADIO_ACTIVE.get(endpoint_id)
+            if sid:
+                meta=_radio_meta_get(sid)
+                if meta.get('title'): data['stream_content']=meta['title']
+                data['radio_station_id']=sid
+            return data
+        if endpoint.get('kind')=='upnp': return upnp_state(endpoint)
+        if endpoint.get('kind')=='cast': return cast_driver.state(endpoint)
+        if endpoint.get('kind')=='airplay': return airplay.status(endpoint_id)
         return endpoint_status(endpoint_id)
     except Exception as exc:
         raise HTTPException(502, str(exc))
+
+
+@app.post('/api/v1/playback/{endpoint_id}/volume')
+def playback_volume(endpoint_id: str, volume: int = Query(ge=0, le=100), authorization: str | None = Header(default=None)):
+    _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
+    if endpoint.get('kind') not in ('sonos','upnp','cast'): raise HTTPException(501, 'Volume control is not wired for this transport yet')
+    try: return {'ok':True,'volume':sonos_set_volume(endpoint,volume) if endpoint.get('kind')=='sonos' else (upnp_set_volume(endpoint,volume) if endpoint.get('kind')=='upnp' else cast_driver.set_volume(endpoint,volume))}
+    except Exception as exc: raise HTTPException(502,str(exc))
+
+@app.post('/api/v1/playback/{endpoint_id}/mute')
+def playback_mute(endpoint_id: str, muted: bool = Query(), authorization: str | None = Header(default=None)):
+    _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
+    if endpoint.get('kind') not in ('sonos','upnp','cast'): raise HTTPException(501, 'Mute control is not wired for this transport yet')
+    try: return {'ok':True,'muted':sonos_set_mute(endpoint,muted) if endpoint.get('kind')=='sonos' else (upnp_set_mute(endpoint,muted) if endpoint.get('kind')=='upnp' else cast_driver.set_mute(endpoint,muted))}
+    except Exception as exc: raise HTTPException(502,str(exc))
 
 
 def _spotify_config():
@@ -395,15 +1000,37 @@ def spotify_status(authorization: str | None = Header(default=None)):
     return out
 
 
+@app.post('/api/v1/providers/spotify/install')
+def spotify_install(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    config=load_provider_secrets().get('spotify') or {'data_dir':'/data/spotify'}
+    try:
+        config['binary']=spotify_soloist.install_latest(config)
+        if config.get('api_key'):
+            save_provider_secret('spotify',config)
+            spotify_soloist.start_daemon(config)
+        return {'ok':True, **spotify_soloist.redacted(config)}
+    except Exception as exc:
+        raise HTTPException(502, f'Spotify Soloist install failed: {exc}')
+
+
 @app.post('/api/v1/providers/spotify/configure')
 def spotify_configure(item: SpotifyConfigInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization); config=item.model_dump(); save_provider_secret('spotify',config)
-    return spotify_soloist.redacted(config)
+    _require_admin(authorization)
+    config=item.model_dump()
+    try:
+        if not spotify_soloist.binary(config):
+            config['binary']=spotify_soloist.install_latest(config)
+        save_provider_secret('spotify',config)
+        runtime=spotify_soloist.start_daemon(config)
+        return {**spotify_soloist.redacted(config), 'runtime_start':runtime}
+    except Exception as exc:
+        raise HTTPException(502, f'Spotify setup failed: {exc}')
 
 
 @app.delete('/api/v1/providers/spotify/configure')
 def spotify_disconnect(authorization: str | None = Header(default=None)):
-    _require_token(authorization); save_provider_secret('spotify',None); return {'ok':True}
+    _require_admin(authorization); save_provider_secret('spotify',None); return {'ok':True}
 
 
 @app.post('/api/v1/providers/spotify/play')
@@ -450,26 +1077,26 @@ def sonos_cloud_status(authorization: str | None = Header(default=None)):
 
 @app.post('/api/v1/providers/sonos/configure')
 def sonos_cloud_configure(item: SonosCloudConfigInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     config=load_provider_secrets().get('sonos') or {}; config.update(item.model_dump()); save_provider_secret('sonos',config)
     return sonos_cloud.redacted(config)
 
 
 @app.delete('/api/v1/providers/sonos/configure')
 def sonos_cloud_disconnect(authorization: str | None = Header(default=None)):
-    _require_token(authorization); save_provider_secret('sonos',None); return {'ok':True}
+    _require_admin(authorization); save_provider_secret('sonos',None); return {'ok':True}
 
 
 @app.get('/api/v1/providers/sonos/authorize-url')
 def sonos_cloud_authorize_url(authorization: str | None = Header(default=None)):
-    _require_token(authorization); config=_sonos_config(); state=uuid.uuid4().hex
+    _require_admin(authorization); config=_sonos_config(); state=uuid.uuid4().hex
     config['oauth_state']=state; save_provider_secret('sonos',config)
     return {'url':sonos_cloud.authorization_url(config,state),'state':state}
 
 
 @app.post('/api/v1/providers/sonos/exchange-code')
 def sonos_cloud_exchange(item: SonosCodeInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization); config=_sonos_config()
+    _require_admin(authorization); config=_sonos_config()
     try: token=sonos_cloud.exchange_code(config,item.code.strip())
     except Exception as exc: raise HTTPException(502,f'Sonos authorization failed: {exc}')
     config.update(token); save_provider_secret('sonos',config); return sonos_cloud.redacted(config)
@@ -477,7 +1104,7 @@ def sonos_cloud_exchange(item: SonosCodeInput, authorization: str | None = Heade
 
 @app.post('/api/v1/providers/sonos/tokens')
 def sonos_cloud_tokens(item: SonosTokenInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization); config=_sonos_config(); config.update(item.model_dump(exclude_none=True)); config['obtained_at']=int(time.time())
+    _require_admin(authorization); config=_sonos_config(); config.update(item.model_dump(exclude_none=True)); config['obtained_at']=int(time.time())
     save_provider_secret('sonos',config); return sonos_cloud.redacted(config)
 
 
@@ -531,7 +1158,7 @@ def bridge_status(provider: str, authorization: str | None = Header(default=None
 
 @app.post('/api/v1/providers/bridge/{provider}/configure')
 def bridge_configure(provider: str, item: ProviderBridgeConfigInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if provider not in provider_bridge.SUPPORTED: raise HTTPException(404,'Unknown licensed provider')
     config={k:v for k,v in item.model_dump().items() if v not in (None,'')}; save_provider_secret(provider,config)
     return provider_bridge.redacted(config)
@@ -539,7 +1166,7 @@ def bridge_configure(provider: str, item: ProviderBridgeConfigInput, authorizati
 
 @app.delete('/api/v1/providers/bridge/{provider}/configure')
 def bridge_disconnect(provider: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if provider not in provider_bridge.SUPPORTED: raise HTTPException(404,'Unknown licensed provider')
     save_provider_secret(provider,None); return {'ok':True}
 
@@ -576,7 +1203,7 @@ def bandcamp_status(authorization: str | None = Header(default=None)):
 
 @app.post('/api/v1/providers/bandcamp/configure')
 def bandcamp_configure(item: BandcampConfigInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     config = {'server': item.server.strip() or bandcamp_provider.DEFAULT_BASE,
               'username': item.username.strip(), 'password': item.password}
     try:
@@ -591,7 +1218,7 @@ def bandcamp_configure(item: BandcampConfigInput, authorization: str | None = He
 
 @app.delete('/api/v1/providers/bandcamp/configure')
 def bandcamp_disconnect(authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     save_provider_secret('bandcamp', None)
     return {'ok': True}
 
@@ -632,7 +1259,7 @@ def bandcamp_stream(song_id: str, request: Request, token: str | None = Query(de
 
 @app.post('/api/v1/providers/podcasts')
 def podcast_add(item: PodcastFeedInput, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     parsed_url = urllib.parse.urlparse(item.url)
     if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
         raise HTTPException(400, 'Podcast feed URL must be http or https')
@@ -653,7 +1280,7 @@ def podcast_add(item: PodcastFeedInput, authorization: str | None = Header(defau
 
 @app.delete('/api/v1/providers/podcasts/{feed_id}')
 def podcast_delete(feed_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     settings = load_settings()
     feeds = [feed for feed in settings.get('podcast_feeds', []) if feed.get('id') != feed_id]
     settings = save_settings({'podcast_feeds': feeds})
@@ -683,7 +1310,7 @@ def sources_list(authorization: str | None = Header(default=None)):
 
 @app.post('/api/v1/sources')
 def sources_save(item: LibrarySourceRequest, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     data=item.model_dump(); data['id']=data.get('id') or ('source-' + uuid.uuid4().hex[:12])
     try:
         validate_source(data)
@@ -696,7 +1323,7 @@ def sources_save(item: LibrarySourceRequest, authorization: str | None = Header(
 
 @app.delete('/api/v1/sources/{source_id}')
 def sources_delete(source_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if not delete_source(source_id):
         raise HTTPException(404, 'Library source not found')
     return {'ok':True}
@@ -704,7 +1331,7 @@ def sources_delete(source_id: str, authorization: str | None = Header(default=No
 
 @app.post('/api/v1/sources/{source_id}/scan')
 def sources_scan(source_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     source=get_source(source_id)
     if not source:
         raise HTTPException(404, 'Library source not found')
@@ -723,7 +1350,7 @@ def sources_scan(source_id: str, authorization: str | None = Header(default=None
 
 @app.post('/api/v1/sources/{source_id}/cache/warm')
 def sources_cache_warm(source_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     source=get_source(source_id)
     if not source:
         raise HTTPException(404, 'Library source not found')
@@ -743,7 +1370,7 @@ def sources_cache_status(authorization: str | None = Header(default=None)):
 
 @app.delete('/api/v1/sources/{source_id}/cache')
 def sources_cache_purge(source_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if not get_source(source_id):
         raise HTTPException(404, 'Library source not found')
     return {'ok':True,'source_id':source_id,'purged':purge_source_cache(source_id)}
@@ -751,13 +1378,13 @@ def sources_cache_purge(source_id: str, authorization: str | None = Header(defau
 
 @app.get('/api/v1/groups')
 def groups_list(authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     return {'groups': list_groups()}
 
 
 @app.post('/api/v1/groups')
 def groups_save(item: GroupRequest, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     group_id = item.id or ('group-' + uuid.uuid4().hex[:12])
     members = [m.model_dump() for m in item.members]
     save_group(group_id, item.name, members)
@@ -766,7 +1393,7 @@ def groups_save(item: GroupRequest, authorization: str | None = Header(default=N
 
 @app.delete('/api/v1/groups/{group_id}')
 def groups_delete(group_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if not delete_group(group_id):
         raise HTTPException(404, 'Group not found')
     return {'ok': True}
@@ -774,7 +1401,7 @@ def groups_delete(group_id: str, authorization: str | None = Header(default=None
 
 @app.put('/api/v1/groups/{group_id}/members/{endpoint_id}/latency')
 def groups_latency(group_id: str, endpoint_id: str, item: LatencyRequest, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     if not update_group_latency(group_id, endpoint_id, item.latency_ms):
         raise HTTPException(404, 'Group member not found')
     return {'ok': True, 'group': get_group(group_id)}
@@ -782,7 +1409,7 @@ def groups_latency(group_id: str, endpoint_id: str, item: LatencyRequest, author
 
 @app.post('/api/v1/groups/{group_id}/play')
 def groups_play(group_id: str, item: GroupPlayRequest, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
+    _admin, token = _require_admin(authorization)
     group = get_group(group_id)
     if not group:
         raise HTTPException(404, 'Group not found')
@@ -797,7 +1424,7 @@ def groups_play(group_id: str, item: GroupPlayRequest, authorization: str | None
 
 @app.post('/api/v1/groups/sessions/{session_id}/stop')
 def groups_stop(session_id: str, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
+    _admin, token = _require_admin(authorization)
     if not _group_playback.stop(session_id, _all_endpoints(), token):
         raise HTTPException(404, 'Session not found')
     return {'ok': True}
@@ -805,20 +1432,63 @@ def groups_stop(session_id: str, authorization: str | None = Header(default=None
 
 @app.get('/api/v1/groups/sessions')
 def groups_sessions(authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     return {'sessions': _group_playback.list_sessions()}
 
 
 
 @app.get('/api/v1/endpoints')
 def endpoints(authorization: str | None = Header(default=None)):
-    _require_token(authorization)
-    return {'endpoints': _all_endpoints()}
+    user, _token = _auth_context(authorization)
+    return {'endpoints': _visible_endpoints(user), 'meridian_models': meridian_discovery.MODELS, 'output_transports': load_settings().get('output_transports') or {}}
+
+
+@app.put('/api/v1/outputs/transport')
+def output_transport(item: OutputTransportInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    host=item.host.strip(); transport=item.transport.strip().lower()
+    if not host: raise HTTPException(400,'Output host required')
+    candidates=[e for e in _all_endpoints() if _endpoint_host(e)==host]
+    kinds=sorted({str(e.get('kind') or '').lower() for e in candidates if e.get('kind')})
+    if transport not in kinds: raise HTTPException(400,f'{transport} is not available on this device')
+    settings=load_settings(); prefs=dict(settings.get('output_transports') or {}); prefs[host]=transport
+    save_settings({'output_transports':prefs})
+    return {'ok':True,'host':host,'transport':transport,'available':kinds}
+
+
+@app.post('/api/v1/endpoints/discover')
+def endpoints_discover(authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    if user.get('role') != 'admin':
+        raise HTTPException(403, 'Administrator access required')
+    items = _all_endpoints(force=True)
+    return {'ok': True, 'count': len(items), 'endpoints': items, 'zones': _logical_zones(user)}
+
+
+@app.put('/api/v1/endpoints/{endpoint_id}/meridian-model')
+def endpoint_meridian_model(endpoint_id: str, item: MeridianModelInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    model = item.model.strip()
+    if model not in meridian_discovery.MODELS:
+        raise HTTPException(400, 'Unknown Meridian model')
+    settings = load_settings()
+    models = dict(settings.get('meridian_models') or {})
+    if model == 'Meridian / Sooloos': models.pop(endpoint_id, None)
+    else: models[endpoint_id] = model
+    save_settings({'meridian_models': models})
+    return {'ok': True, 'endpoint_id': endpoint_id, 'model': model}
+
+
+
+@app.get('/api/v1/zones')
+def zones(authorization: str | None = Header(default=None)):
+    user, _token = _auth_context(authorization)
+    return {'zones': _logical_zones(user)}
 
 
 @app.post('/api/v1/endpoints/register')
 def register_endpoint(item: EndpointRegistration, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     upsert_endpoint(item.model_dump())
     return {'ok': True}
 
@@ -843,7 +1513,7 @@ def upnp(authorization: str | None = Header(default=None)):
 
 @app.post('/api/v1/library/scan')
 def library_scan(path: str = Query(default=None), authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_admin(authorization)
     root = path or os.getenv('SURROUNDCORE_MEDIA', '/media')
     items = scan(root)
     for item in items:
@@ -852,10 +1522,80 @@ def library_scan(path: str = Query(default=None), authorization: str | None = He
     return {'root': root, 'scanned': len(items), 'items': items}
 
 
+def _media_matches(item, q='', artist='', album=''):
+    meta=item.get('metadata') or {}
+    if artist and str(meta.get('artist') or meta.get('album_artist') or '').casefold() != artist.casefold(): return False
+    if album and str(meta.get('album') or '').casefold() != album.casefold(): return False
+    if not q: return True
+    hay=' '.join(str(x or '') for x in (meta.get('title'),meta.get('artist'),meta.get('album_artist'),meta.get('album'),item.get('path'))).casefold()
+    return q.casefold() in hay
+
+
 @app.get('/api/v1/library')
-def library(authorization: str | None = Header(default=None)):
+def library(q: str = Query(default=''), artist: str = Query(default=''), album: str = Query(default=''),
+            offset: int = Query(default=0, ge=0), limit: int = Query(default=500, ge=1, le=5000),
+            authorization: str | None = Header(default=None)):
     _require_token(authorization)
-    return {'items': list_media()}
+    items=[x for x in list_media() if _media_matches(x,q,artist,album)]
+    return {'total':len(items),'offset':offset,'limit':limit,'items':items[offset:offset+limit]}
+
+
+def _is_audiobook(item):
+    meta=item.get('metadata') or {}
+    source=str(item.get('source_id') or '').casefold()
+    path=str(item.get('path') or '').casefold()
+    genre=' '.join(str(meta.get(k) or '') for k in ('genre','content_type','media_type')).casefold()
+    return ('audible' in source or 'audiobook' in source or '/audiobooks/' in path or
+            'audiobooks' in path or 'audiobook' in genre or 'spoken word' in genre)
+
+
+@app.get('/api/v1/library/audiobooks')
+def library_audiobooks(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
+                       limit: int = Query(default=500, ge=1, le=5000), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    items=[x for x in list_media() if _is_audiobook(x) and _media_matches(x,q)]
+    return {'total':len(items),'offset':offset,'limit':limit,'items':items[offset:offset+limit]}
+
+
+@app.get('/api/v1/library/albums')
+def library_albums(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
+                   limit: int = Query(default=250, ge=1, le=2000), authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    albums={}
+    for item in list_media():
+        meta=item.get('metadata') or {}
+        title=str(meta.get('album') or 'Unknown Album').strip() or 'Unknown Album'
+        artist=str(meta.get('album_artist') or meta.get('artist') or 'Unknown Artist').strip() or 'Unknown Artist'
+        key=(artist.casefold(),title.casefold())
+        if q and q.casefold() not in (artist+' '+title).casefold(): continue
+        row=albums.setdefault(key,{'artist':artist,'album':title,'representative_media_id':item.get('id'),'tracks':0,
+                                   'sample_rates':set(),'bit_depths':set(),'channels':set(),'codecs':set()})
+        row['tracks'] += 1
+        if item.get('sample_rate'): row['sample_rates'].add(int(item['sample_rate']))
+        if item.get('bit_depth'): row['bit_depths'].add(int(item['bit_depth']))
+        if item.get('channels'): row['channels'].add(int(item['channels']))
+        if item.get('codec'): row['codecs'].add(str(item['codec']))
+    out=[]
+    for row in albums.values():
+        row=dict(row)
+        for field in ('sample_rates','bit_depths','channels','codecs'): row[field]=sorted(row[field])
+        out.append(row)
+    out.sort(key=lambda x:(x['artist'].casefold(),x['album'].casefold()))
+    return {'total':len(out),'offset':offset,'limit':limit,'albums':out[offset:offset+limit]}
+
+
+@app.get('/api/v1/media/{media_id}/artwork.jpg')
+def media_artwork(media_id: int, token: str | None = Query(default=None), authorization: str | None = Header(default=None)):
+    _require_token(authorization, token)
+    item=get_media(media_id)
+    if not item: raise HTTPException(404,'Media not found')
+    try:
+        source=dict(item); source['path']=_resolved_media(item)
+        data=artwork.cover_bytes(source)
+    except Exception:
+        data=None
+    if not data: raise HTTPException(404,'Artwork not found')
+    return Response(content=data,media_type='image/jpeg',headers={'Cache-Control':'private, max-age=86400'})
 
 
 @app.head('/api/v1/media/{media_id}/stream')
@@ -921,10 +1661,10 @@ def programme_stream(request: Request, media_ids: str, token: str | None = Query
 
 @app.get('/api/v1/endpoints/{endpoint_id}/plan/{media_id}')
 def endpoint_plan(endpoint_id: str, media_id: int, device: str = Query(default='default'), authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(endpoint_id, authorization)
     endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
-    if not endpoint or endpoint.get('kind') != 'alsa':
-        raise HTTPException(404, 'ALSA endpoint not found')
+    if not endpoint or endpoint.get('kind') not in ('alsa', 'airplay', 'sonos', 'upnp', 'cast', 'meridian'):
+        raise HTTPException(404, 'Playback endpoint not found')
     media = get_media(media_id)
     if not media:
         raise HTTPException(404, 'Media not found')
@@ -933,37 +1673,64 @@ def endpoint_plan(endpoint_id: str, media_id: int, device: str = Query(default='
 
 @app.post('/api/v1/endpoints/{endpoint_id}/play')
 def endpoint_play(endpoint_id: str, item: EndpointPlayRequest, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
+    _user, token = _require_zone(endpoint_id, authorization)
     endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
-    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
-        raise HTTPException(404, 'ALSA endpoint not found')
+    if not endpoint or endpoint.get('kind') not in ('alsa', 'airplay', 'sonos', 'upnp', 'cast', 'meridian') or not endpoint.get('address'):
+        raise HTTPException(404, 'Playback endpoint not found')
     media = get_media(item.media_id)
     if not media:
         raise HTTPException(404, 'Media not found')
     plan = pcm_playback_plan(media, endpoint, item.device, load_settings())
     if not plan.get('supported'):
-        raise HTTPException(409, plan.get('reason') or 'Endpoint cannot play source natively')
+        raise HTTPException(409, plan.get('reason') or 'Endpoint cannot play source')
     volume = max(0.0, min(float(item.volume), 1.0))
-    result = _post_json(endpoint['address'].rstrip('/') + '/v1/play', {
-        'url': _media_url(item.media_id, token), 'device': item.device, 'volume': volume,
-        'position_seconds': item.position_seconds,
-        'mode': plan.get('mode', 'direct'), 'source': plan.get('source'),
-    }, token)
+    if endpoint.get('kind') == 'airplay':
+        try:
+            result = airplay.play(endpoint, _media_url(item.media_id, token), media,
+                                  position_seconds=item.position_seconds, volume=volume)
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
+    elif endpoint.get('kind') == 'sonos':
+        stereo_flac_cache(_resolved_media(media))
+        sonos_volume=sonos_set_volume(endpoint, round(volume*49))
+        uri=_media_url(item.media_id, token, sonos=True)
+        sonos_play_uri(endpoint, uri)
+        if item.position_seconds > 0: sonos_seek(endpoint, item.position_seconds)
+        result={'transport':'sonos','volume':sonos_volume,'uri':uri}
+    elif endpoint.get('kind') == 'upnp':
+        uri=_media_url(item.media_id, token)
+        upnp_play_uri(endpoint,uri)
+        if item.position_seconds > 0: upnp_seek(endpoint,item.position_seconds)
+        result={'transport':'upnp','uri':uri}
+    elif endpoint.get('kind') == 'cast':
+        return _play_compat_programme(endpoint,[media],[item.media_id],token,volume,item.position_seconds)
+    else:
+        result = _post_json(endpoint['address'].rstrip('/') + '/v1/play', {
+            'url': _media_url(item.media_id, token), 'device': item.device, 'volume': volume,
+            'position_seconds': item.position_seconds,
+            'mode': plan.get('mode', 'direct'), 'source': plan.get('source'),
+        }, _agent_token())
     session = sessions.start_library(endpoint_id, [media], position_seconds=item.position_seconds, plan=plan)
     return {'ok': True, 'endpoint': endpoint_id, 'volume': volume, 'plan': plan, 'session': session, 'result': result}
 
 
 @app.post('/api/v1/endpoints/{endpoint_id}/programme')
 def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
-    endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
-    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
-        raise HTTPException(404, 'ALSA endpoint not found')
+    _user, token = _require_zone(endpoint_id, authorization)
+    endpoint = _playback_endpoint(endpoint_id)
+    if endpoint.get('kind') not in ('alsa','airplay','sonos','upnp','cast','meridian') or not endpoint.get('address'):
+        raise HTTPException(404, 'Playback endpoint not found')
     if not item.media_ids:
         raise HTTPException(400, 'Programme requires media_ids')
     media = [get_media(media_id) for media_id in item.media_ids]
     if any(x is None for x in media):
         raise HTTPException(404, 'Programme media not found')
+    volume = max(0.0, min(float(item.volume), 1.0))
+    if endpoint.get('kind') in ('sonos','airplay','upnp','cast'):
+        try:
+            return _play_compat_programme(endpoint, media, item.media_ids, token, volume, item.position_seconds)
+        except Exception as exc:
+            raise HTTPException(502, str(exc))
     settings = load_settings()
     plans = [pcm_playback_plan(x, endpoint, item.device, settings) for x in media]
     failed = next((p for p in plans if not p.get('supported')), None)
@@ -975,12 +1742,11 @@ def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authori
              str(p['source'].get('channel_layout') or '').lower()) for p in plans]
     if any(k != keys[0] for k in keys[1:]):
         raise HTTPException(409, 'Native gapless programme requires identical sample rate, channel layout and bit depth')
-    volume = max(0.0, min(float(item.volume), 1.0))
     result = _post_json(endpoint['address'].rstrip('/') + '/v1/programme', {
         'urls': [_media_url(media_id, token) for media_id in item.media_ids],
         'device': item.device, 'volume': volume, 'position_seconds': item.position_seconds,
         'mode': 'direct', 'source': plans[0]['source'], 'sources': [p['source'] for p in plans],
-    }, token)
+    }, _agent_token())
     session = sessions.start_library(endpoint_id, media, position_seconds=item.position_seconds,
                                      plan={'mode':'direct','gapless':True,'tracks':len(media)})
     return {'ok': True, 'endpoint': endpoint_id, 'plan': session['plan'], 'session': session, 'result': result}
@@ -988,13 +1754,14 @@ def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authori
 
 @app.get('/api/v1/sessions')
 def playback_sessions(authorization: str | None = Header(default=None)):
-    _require_token(authorization)
-    return {'sessions': sessions.list_views()}
+    user, _token = _auth_context(authorization)
+    allowed = {e.get('id') for e in _visible_endpoints(user)}
+    return {'sessions': [x for x in sessions.list_views() if x.get('endpoint_id') in allowed]}
 
 
 @app.get('/api/v1/sessions/{endpoint_id}')
 def playback_session(endpoint_id: str, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    _require_zone(endpoint_id, authorization)
     session = sessions.view(endpoint_id)
     if not session: raise HTTPException(404, 'Playback session not found')
     return session
@@ -1002,38 +1769,67 @@ def playback_session(endpoint_id: str, authorization: str | None = Header(defaul
 
 def _session_endpoint(endpoint_id):
     endpoint = next((e for e in _all_endpoints() if e.get('id') == endpoint_id), None)
-    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
-        raise HTTPException(404, 'ALSA endpoint not found')
+    if not endpoint or endpoint.get('kind') not in ('alsa', 'airplay', 'sonos', 'upnp', 'cast', 'meridian') or not endpoint.get('address'):
+        raise HTTPException(404, 'Playback endpoint not found')
     return endpoint
 
 
 @app.post('/api/v1/sessions/{endpoint_id}/{control}')
 def playback_session_control(endpoint_id: str, control: str, position_seconds: float | None = Query(default=None), authorization: str | None = Header(default=None)):
-    token = _require_token(authorization); endpoint = _session_endpoint(endpoint_id)
+    _user, token = _require_zone(endpoint_id, authorization); endpoint = _session_endpoint(endpoint_id)
     if not sessions.view(endpoint_id): raise HTTPException(404, 'Playback session not found')
+    kind=endpoint.get('kind'); is_airplay=kind=='airplay'; is_sonos=kind=='sonos'; is_upnp=kind=='upnp'; is_cast=kind=='cast'
     if control in ('pause','resume','stop'):
-        result = _post_json(endpoint['address'].rstrip('/') + '/v1/' + control, {}, token)
+        try:
+            if is_airplay:
+                result = airplay.stop(endpoint_id) if control == 'stop' else ({'ok': airplay.pause(endpoint_id)} if control == 'pause' else {'ok': airplay.resume(endpoint_id)})
+            elif is_sonos:
+                if control=='stop': result={'ok':sonos_stop(endpoint)}
+                elif control=='pause': result={'ok':sonos_pause(endpoint)}
+                else: result={'ok':sonos_resume(endpoint)}
+            elif is_upnp:
+                if control=='stop': result={'ok':upnp_stop(endpoint)}
+                elif control=='pause': result={'ok':upnp_pause(endpoint)}
+                else: result={'ok':upnp_resume(endpoint)}
+            elif is_cast:
+                if control=='stop': result={'ok':cast_driver.stop(endpoint)}
+                elif control=='pause': result={'ok':cast_driver.pause(endpoint)}
+                else: result={'ok':cast_driver.resume(endpoint)}
+            else:
+                result = _post_json(endpoint['address'].rstrip('/') + '/v1/' + control, {}, _agent_token())
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
         session = sessions.clear(endpoint_id) if control == 'stop' else sessions.set_state(endpoint_id, 'paused' if control == 'pause' else 'playing')
         return {'ok': True, 'session': session, 'result': result}
     if control == 'seek':
         if position_seconds is None: raise HTTPException(400, 'position_seconds required')
-        target = max(0.0, float(position_seconds)); result = _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, token)
+        target = max(0.0, float(position_seconds))
+        try:
+            result = airplay.seek(endpoint_id, target) if is_airplay else (sonos_seek(endpoint,target) if is_sonos else (upnp_seek(endpoint,target) if is_upnp else (cast_driver.seek(endpoint,target) if is_cast else _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, _agent_token()))))
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
         return {'ok': True, 'session': sessions.seek(endpoint_id, target), 'result': result}
     if control in ('next','previous'):
         target = sessions.control_target(endpoint_id, control)
         if target is None: raise HTTPException(409, f'{control} is not available')
-        result = _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, token)
+        try:
+            result = airplay.seek(endpoint_id, target) if is_airplay else (sonos_seek(endpoint,target) if is_sonos else (upnp_seek(endpoint,target) if is_upnp else (cast_driver.seek(endpoint,target) if is_cast else _post_json(endpoint['address'].rstrip('/') + '/v1/seek', {'position_seconds': target}, _agent_token()))))
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
         return {'ok': True, 'session': sessions.seek(endpoint_id, target), 'result': result}
     raise HTTPException(404, 'Unknown playback control')
 
 
 @app.post('/api/v1/endpoints/{endpoint_id}/stop')
 def endpoint_stop(endpoint_id: str, authorization: str | None = Header(default=None)):
-    token = _require_token(authorization)
+    _user, token = _require_zone(endpoint_id, authorization)
     endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
-    if not endpoint or endpoint.get('kind') != 'alsa' or not endpoint.get('address'):
-        raise HTTPException(404, 'ALSA endpoint not found')
-    result = _post_json(endpoint['address'].rstrip('/') + '/v1/stop', {}, token)
+    if not endpoint or endpoint.get('kind') not in ('alsa', 'airplay', 'sonos', 'upnp', 'cast', 'meridian') or not endpoint.get('address'):
+        raise HTTPException(404, 'Playback endpoint not found')
+    try:
+        result = airplay.stop(endpoint_id) if endpoint.get('kind') == 'airplay' else ({'ok':sonos_stop(endpoint)} if endpoint.get('kind')=='sonos' else ({'ok':upnp_stop(endpoint)} if endpoint.get('kind')=='upnp' else ({'ok':cast_driver.stop(endpoint)} if endpoint.get('kind')=='cast' else _post_json(endpoint['address'].rstrip('/') + '/v1/stop', {}, _agent_token()))))
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
     session = sessions.clear(endpoint_id)
     return {'ok': True, 'session': session, 'result': result}
 

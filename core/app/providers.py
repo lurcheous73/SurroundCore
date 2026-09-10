@@ -21,14 +21,15 @@ PROVIDERS = [
         'formats': ['Bandcamp Subsonic beta'],
     },
     {
-        'id': 'hdtracks', 'name': 'HDtracks',
-        'kind': 'partner', 'auth': 'provider/partner login', 'implemented': False,
-        'quality': 'highest-native', 'formats': ['PCM/FLAC', 'MQA', 'AIRIA'],
-    },
-    {
         'id': 'spotify', 'name': 'Spotify',
         'kind': 'soloist/connect', 'auth': 'Spotify Soloist API key + Connect pairing', 'implemented': True,
         'quality': 'provider-highest', 'formats': ['lossless up to 24/44.1 where account supports it'],
+    },
+    {
+        'id': 'amazon_music', 'name': 'Amazon Music',
+        'kind': 'web-api/partner', 'auth': 'Login with Amazon + approved Music Web API', 'implemented': False,
+        'quality': 'UHD FLAC up to 24-bit/192 kHz; Spatial Audio where available',
+        'formats': ['HD FLAC', 'UHD FLAC 24/48-192', 'Dolby Atmos', 'Sony 360 Reality Audio'],
     },
     {
         'id': 'sonos_radio', 'name': 'Sonos Radio / Favorites',
@@ -76,17 +77,17 @@ def provider_status(settings):
         item['connected'] = bool(saved.get('connected', False))
         if provider['id'] == 'bandcamp':
             item['connected'] = provider_secret_configured('bandcamp')
-        elif provider['id'] == 'hdtracks':
-            item['configured'] = provider_secret_configured('hdtracks')
-            item['connected'] = False
-            item['airia_available'] = airia_available()
-            item['partner_credentials'] = bool(os.getenv('SURROUNDCORE_HDTRACKS_CLIENT_ID')) or item.get('configured', False)
         elif provider['id'] == 'spotify':
             cfg = secrets.get('spotify') or {}
             item['configured'] = bool(cfg.get('api_key'))
             item['connected'] = False
             item['soloist_available'] = bool(_soloist_path())
             item['soloist_path'] = _soloist_path()
+        elif provider['id'] == 'amazon_music':
+            item['configured'] = provider_secret_configured('amazon_music')
+            item['connected'] = False
+            item['approval_required'] = True
+            item['api_status'] = 'closed_beta'
         elif provider['id'] == 'sonos_radio':
             cfg = secrets.get('sonos') or {}
             item['configured'] = bool(cfg.get('client_id') and cfg.get('client_secret'))

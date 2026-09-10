@@ -1,7 +1,7 @@
 FROM debian:13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv ffmpeg ca-certificates \
+    python3 python3-venv ffmpeg ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

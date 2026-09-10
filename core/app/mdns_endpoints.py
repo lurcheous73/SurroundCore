@@ -1,4 +1,4 @@
-import socket
+import re
 import time
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 from .models import Endpoint
@@ -8,6 +8,27 @@ SERVICE_KINDS = {
     '_raop._tcp.local.': 'airplay',
     '_airplay._tcp.local.': 'airplay',
 }
+
+
+def _normalise_airplay_id(name, props):
+    deviceid = str(props.get('deviceid') or '').strip()
+    if deviceid:
+        raw = re.sub(r'[^0-9A-Fa-f]', '', deviceid)
+    else:
+        instance = name.split('._', 1)[0].split('@', 1)[0]
+        raw = re.sub(r'[^0-9A-Fa-f]', '', instance)
+    if len(raw) == 12:
+        return ':'.join(raw[i:i+2] for i in range(0, 12, 2)).upper()
+    return deviceid or name
+
+
+def _display_name(name, props):
+    if props.get('fn'):
+        return props['fn']
+    instance = name.split('._', 1)[0]
+    if '@' in instance:
+        return instance.split('@', 1)[1]
+    return instance
 
 
 class _Listener(ServiceListener):
@@ -36,22 +57,29 @@ class _Listener(ServiceListener):
             k = key.decode('utf-8', 'replace') if isinstance(key, bytes) else str(key)
             v = value.decode('utf-8', 'replace') if isinstance(value, bytes) else str(value)
             props[k] = v
-        display = props.get('fn') or props.get('md') or name.split('._', 1)[0]
-        endpoint_id = props.get('id') or props.get('deviceid') or name
-        channels = 2
+        display = _display_name(name, props)
+        endpoint_id = _normalise_airplay_id(name, props) if self.kind == 'airplay' else (props.get('id') or name)
+        capabilities = {
+            'service_type': self.service_type,
+            'port': info.port,
+            'txt': props,
+            'render_multichannel_to_stereo': True,
+        }
+        if self.kind == 'airplay':
+            capabilities.update({
+                'airplay2_native_realtime': True,
+                'timing': 'ptp',
+                'buffered': False,
+                'render': {'codec': 'alac', 'sample_rate': 44100, 'bit_depth': 16, 'channels': 2},
+            })
         self.items[name] = Endpoint(
             id=f'{self.kind}:{endpoint_id}',
             name=display,
             kind=self.kind,
-            channels=channels,
+            channels=2,
             channel_map=['LF', 'RF'],
             address=addresses[0] if addresses else None,
-            capabilities={
-                'service_type': self.service_type,
-                'port': info.port,
-                'txt': props,
-                'render_multichannel_to_stereo': True,
-            },
+            capabilities=capabilities,
         ).dict()
 
 

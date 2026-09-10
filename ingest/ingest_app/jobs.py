@@ -10,11 +10,13 @@ from . import engine
 
 STATE = engine.INGEST_ROOT / 'state' / 'jobs.json'
 UPLOADS = engine.INGEST_ROOT / 'uploads'
-AUTO_RIP = os.getenv('SURROUNDCORE_AUTO_RIP', 'true').lower() not in ('0','false','no')
-AUTO_NETMD = os.getenv('SURROUNDCORE_AUTO_NETMD', 'true').lower() not in ('0','false','no')
+BURN_UPLOADS = engine.INGEST_ROOT / 'burn'
+AUTO_RIP = False
+AUTO_NETMD = False
 AUTO_EJECT = os.getenv('SURROUNDCORE_INGEST_EJECT', 'true').lower() not in ('0','false','no')
 KEEP_UPLOADS = os.getenv('SURROUNDCORE_INGEST_KEEP_UPLOADS', 'false').lower() in ('1','true','yes')
-POLL_SECONDS = max(3, int(os.getenv('SURROUNDCORE_INGEST_POLL_SECONDS', '8')))
+POLL_SECONDS = 60
+OPTICAL_REMOVE_MISSES = max(2, int(os.getenv('SURROUNDCORE_INGEST_REMOVE_MISSES', '2')))
 
 _lock = threading.RLock()
 _jobs = {}
@@ -72,19 +74,32 @@ def enqueue(kind, source, label=None, fingerprint='', force=False):
     _q.put(job['id']); return dict(job)
 
 
+def enqueue_burn(kind, source, device, label=None):
+    if kind not in ('burn_iso','burn_cue'):
+        raise ValueError('Unsupported burn job kind')
+    if active_key(kind, source): return None
+    job={'id':uuid.uuid4().hex[:12],'kind':kind,'source':str(source),'label':label or Path(source).name,
+         'target_device':str(device),'fingerprint':'','status':'queued','created':_now(),'updated':_now(),
+         'result':None,'error':'','core_sync':None}
+    with _lock: _jobs[job['id']]=job; _save()
+    _q.put(job['id']); return dict(job)
+
+
 def _update(job_id, **values):
     with _lock:
         if job_id not in _jobs: return
         _jobs[job_id].update(values); _jobs[job_id]['updated']=_now(); _save()
 
 
-def _process(job):
+def _process_unlocked(job):
     kind, source = job['kind'], job['source']
     if kind == 'physical':
         result=engine.process_physical(source)
         if AUTO_EJECT: engine.eject(source)
         return result
     if kind == 'netmd': return engine.rip_netmd()
+    if kind == 'burn_iso': return engine.burn_image(job.get('target_device'), Path(source), 'iso')
+    if kind == 'burn_cue': return engine.burn_image(job.get('target_device'), Path(source), 'cue')
     path=Path(source)
     if kind == 'iso' or path.suffix.lower() == '.iso': return engine.process_iso(path, job.get('label') or path.stem)
     if kind == 'bin' or path.suffix.lower() == '.bin':
@@ -96,6 +111,10 @@ def _process(job):
     raise RuntimeError(f'Unsupported ingest file: {path.name}')
 
 
+def _process(job):
+    with engine.media_lock():
+        return _process_unlocked(job)
+
 def _worker():
     while not _stop.is_set():
         try: job_id=_q.get(timeout=1)
@@ -105,8 +124,9 @@ def _worker():
         _update(job_id,status='running',error='')
         try:
             result=_process(job); sync=None
-            try: sync=engine.notify_core()
-            except Exception as exc: sync={'ok':False,'error':str(exc)}
+            if not str(job.get('kind') or '').startswith('burn_'):
+                try: sync=engine.notify_core()
+                except Exception as exc: sync={'ok':False,'error':str(exc)}
             _update(job_id,status='done',result=result,core_sync=sync)
             if not KEEP_UPLOADS and job.get('kind') in ('iso','bin','cue','upload'):
                 p=Path(job.get('source',''))
@@ -114,6 +134,14 @@ def _worker():
                     if p.is_file() and UPLOADS in p.parents: p.unlink()
                     pair=p.with_suffix('.cue' if p.suffix.lower()=='.bin' else '.bin')
                     if pair.is_file() and UPLOADS in pair.parents: pair.unlink()
+                except OSError: pass
+            if str(job.get('kind') or '').startswith('burn_'):
+                p=Path(job.get('source',''))
+                try:
+                    if p.is_file() and BURN_UPLOADS in p.parents: p.unlink()
+                    if p.suffix.lower()=='.cue':
+                        pair=p.with_suffix('.bin')
+                        if pair.is_file() and BURN_UPLOADS in pair.parents: pair.unlink()
                 except OSError: pass
         except Exception as exc:
             _update(job_id,status='failed',error=str(exc))
@@ -139,17 +167,47 @@ def hash_file_identity(path):
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
+def _scan_optical_once(seen, misses):
+    devices = engine.optical_devices()
+    present = {dev['device'] for dev in devices}
+    for device in list(seen):
+        if device not in present:
+            seen.pop(device, None)
+            misses.pop(device, None)
+    for dev in devices:
+        device = dev['device']
+        # Never probe a drive while its physical ingest job is active.
+        if active_key('physical', device):
+            continue
+        try:
+            identity = engine.media_identity(device)
+        except Exception:
+            identity = None
+        fingerprint = identity.get('fingerprint', '') if identity else ''
+        if not fingerprint:
+            if device in seen:
+                misses[device] = misses.get(device, 0) + 1
+                if misses[device] >= OPTICAL_REMOVE_MISSES:
+                    seen.pop(device, None)
+                    misses.pop(device, None)
+            continue
+        misses[device] = 0
+        if seen.get(device) == fingerprint:
+            continue
+        seen[device] = fingerprint
+        enqueue('physical', device, dev.get('name'), fingerprint)
+
+
 def _monitor():
     last_netmd=''
+    optical_seen={}
+    optical_misses={}
     while not _stop.wait(POLL_SECONDS):
         try: _scan_uploads()
         except Exception: pass
         if AUTO_RIP:
-            for dev in engine.optical_devices():
-                try: identity=engine.media_identity(dev['device'])
-                except Exception: identity=None
-                if identity and identity.get('fingerprint'):
-                    enqueue('physical',dev['device'],dev.get('name'),identity['fingerprint'])
+            try: _scan_optical_once(optical_seen, optical_misses)
+            except Exception: pass
         if AUTO_NETMD and engine.netmd_available():
             try:
                 status=engine.netmd_status(); fp=status.get('fingerprint','') if status.get('available') else ''

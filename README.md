@@ -25,6 +25,7 @@ Current status: **v0.5 development / developer preview**. Storage, synchronized 
 - Treat bonded Sonos speaker sets as one logical zone with explicit channel roles.
 - Support multiple local, USB, NFS, SMB/CIFS and rclone-backed library sources with optional read-through/pinned cache.
 - Provide a small authenticated HTTP API for ControlMac and other clients.
+- Support secure RemoteLink zones across the Internet without static IP, DDNS or inbound port forwarding.
 - Run the Core in Docker while keeping physical ALSA/HDMI playback in a native endpoint agent.
 
 ## Storage foundation (v0.4 development)
@@ -123,7 +124,7 @@ Media should normally be mounted read-only into the CT from the host dataset:
 ./proxmox/add-media-bind.sh 700 /path/to/music-surround
 ```
 
-See `docs/SHARES.md` for host mounts and `docs/STORAGE.md` for multi-source/cache configuration.
+See `docs/SHARES.md` for host mounts and `docs/STORAGE.md` for multi-source/cache configuration. Remote-zone architecture is documented in `docs/REMOTE.md`.
 
 ## API
 

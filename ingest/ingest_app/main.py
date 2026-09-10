@@ -49,12 +49,31 @@ def capabilities(authorization: str|None=Header(default=None)):
 @app.get('/api/v1/ingest/devices')
 def devices(authorization: str|None=Header(default=None)):
     require_token(authorization)
+    # Hardware enumeration must stay fast. Deep media/NetMD probes are explicit
+    # endpoints because real optical/USB stacks can block for many seconds.
     optical=[]
     for item in engine.optical_devices():
-        try: item['media']=engine.media_identity(item['device'])
-        except Exception as exc: item['media']={'error':str(exc)}
-        optical.append(item)
-    return {'optical':optical,'netmd':engine.netmd_status() if engine.netmd_available() else {'available':False,'reason':'NetMD helper not installed'}}
+        row=dict(item); row['media']={'state':'not_probed'}; optical.append(row)
+    return {'optical':optical,'netmd':{'helper_available':engine.netmd_available(),'state':'not_probed'}}
+
+@app.get('/api/v1/ingest/optical/status')
+def optical_status(device:str,authorization: str|None=Header(default=None)):
+    require_token(authorization)
+    allowed={d['device'] for d in engine.optical_devices()}
+    if device not in allowed: raise HTTPException(404,'Optical drive not found')
+    try:
+        with engine.media_lock(): media=engine.media_identity(device)
+    except Exception as exc: return {'device':device,'media':{'error':str(exc)}}
+    return {'device':device,'media':media or {'state':'empty_or_unreadable'}}
+
+@app.get('/api/v1/ingest/netmd/status')
+def netmd_status(authorization: str|None=Header(default=None)):
+    require_token(authorization)
+    if not engine.netmd_available(): return {'available':False,'reason':'NetMD helper not installed'}
+    try:
+        with engine.media_lock(): return engine.netmd_status()
+    except Exception as exc:
+        return {'available':False,'reason':str(exc)}
 
 @app.get('/api/v1/ingest/jobs')
 def list_jobs(authorization: str|None=Header(default=None)):
@@ -71,16 +90,13 @@ def rip(req:RipRequest,authorization: str|None=Header(default=None)):
     require_token(authorization)
     allowed={d['device'] for d in engine.optical_devices()}
     if req.device not in allowed: raise HTTPException(404,'Optical drive not found')
-    identity=engine.media_identity(req.device)
-    if not identity: raise HTTPException(409,'No readable media in optical drive')
-    job=jobs.enqueue('physical',req.device,req.device,identity.get('fingerprint',''),force=req.force)
+    job=jobs.enqueue('physical',req.device,req.device,'',force=True)
     return {'queued':bool(job),'job':job,'already_completed':job is None}
 
 @app.post('/api/v1/ingest/netmd')
 def rip_md(authorization: str|None=Header(default=None)):
-    require_token(authorization); status=engine.netmd_status()
-    if not status.get('available'): raise HTTPException(409,status.get('reason') or 'No NetMD device')
-    job=jobs.enqueue('netmd','netmd',status.get('disc_title') or 'MiniDisc',status.get('fingerprint',''),force=True)
+    require_token(authorization)
+    job=jobs.enqueue('netmd','netmd','MiniDisc','',force=True)
     return {'queued':bool(job),'job':job}
 
 

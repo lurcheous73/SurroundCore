@@ -2,7 +2,7 @@ import urllib.parse
 
 import httpx
 
-SUPPORTED={'tidal','qobuz','hdtracks','apple_music','audible'}
+SUPPORTED={'tidal','qobuz','amazon_music','apple_music','audible'}
 
 
 def redacted(config):

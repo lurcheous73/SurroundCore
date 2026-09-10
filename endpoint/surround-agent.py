@@ -21,6 +21,9 @@ DEFAULT_DEVICE = os.getenv('SURROUNDCORE_DEFAULT_DEVICE', 'default')
 MAX_VOLUME = 0.49
 DIRECT_MODE = 'direct'
 COMPAT_MODE = 'compatibility'
+ENCODED_MODE = 'encoded-passthrough'
+NATIVE_DSD_MODE = 'native-dsd'
+DOP_MODE = 'dop'
 
 
 def run(*args):
@@ -38,6 +41,26 @@ def local_ip():
     ips = run('hostname', '-I').split()
     return ips[0] if ips else '127.0.0.1'
 
+
+DEVICE_FAMILIES = [
+    (('SOUND BLASTER','CREATIVE'), 'Creative Sound Blaster'),
+    (('RME','FIREFACE','BABYFACE'), 'RME Audio'),
+    (('FOCUSRITE','SCARLETT','CLARETT'), 'Focusrite'),
+    (('MOTU',), 'MOTU'), (('TOPPING',), 'Topping'), (('S.M.S.L','SMSL'), 'SMSL'),
+    (('IFI AUDIO','IFI '), 'iFi Audio'), (('FIIO',), 'FiiO'), (('CHORD',), 'Chord Electronics'),
+    (('SCHIIT',), 'Schiit Audio'), (('CAMBRIDGE AUDIO',), 'Cambridge Audio'),
+    (('BENCHMARK',), 'Benchmark Media'), (('MINIDSP',), 'miniDSP'),
+    (('PRESONUS',), 'PreSonus'), (('BEHRINGER',), 'Behringer'),
+    (('STEINBERG',), 'Steinberg'), (('UNIVERSAL AUDIO',), 'Universal Audio'),
+    (('DENON',), 'Denon'), (('MARANTZ',), 'Marantz'), (('YAMAHA',), 'Yamaha'),
+    (('NAD',), 'NAD'), (('ROTEL',), 'Rotel'), (('ARCAM',), 'Arcam'),
+]
+
+def device_family(description):
+    text=str(description or '').upper()
+    for needles,name in DEVICE_FAMILIES:
+        if any(n in text for n in needles): return name
+    return 'USB Audio Class' if 'USB' in text else 'Generic ALSA'
 
 def classify_output(description):
     text = description.upper()
@@ -82,10 +105,24 @@ def _hdmi_lpcm_caps(card):
             channels += _ints(item.get('channels', ''))
             rates.update(x for x in _ints(item.get('rates', ''), 8000) if x <= 768000)
             bits.update(x for x in _ints(item.get('bits', ''), 8) if x <= 64)
+    encoded=set(); sink_names=[]; eld_versions=[]
+    for path in Path(f'/proc/asound/card{card}').glob('eld*'):
+        try: text=path.read_text(errors='replace')
+        except OSError: continue
+        for raw in text.splitlines():
+            line=raw.strip()
+            if line.startswith('monitor_name '): sink_names.append(line.split(None,1)[1])
+            elif line.startswith('eld_version '): eld_versions.append(line.split(None,1)[1])
+            elif '_coding_type ' in line:
+                coding=line.split(None,1)[1].strip()
+                if 'LPCM' not in coding.upper(): encoded.add(coding)
     return {
         'max_channels': max(channels) if channels else None,
         'sample_rates': sorted(rates), 'bit_depths': sorted(bits),
-        'capability_source': 'hdmi-eld' if rates or channels or bits else 'unknown',
+        'encoded_formats': sorted(encoded), 'sink_name': sink_names[0] if sink_names else None,
+        'eld_version': eld_versions[0] if eld_versions else None,
+        'link_families': ['HDMI 1.x','HDMI 2.x','DisplayPort'],
+        'capability_source': 'hdmi-eld' if rates or channels or bits or encoded else 'unknown',
     }
 
 
@@ -96,7 +133,7 @@ def _usb_pcm_caps(card):
         return {'max_channels': None, 'sample_rates': [], 'bit_depths': [], 'capability_source': 'unknown'}
     try: text = path.read_text(errors='replace')
     except OSError: text = ''
-    rates, bits, channels = set(), set(), []
+    rates, bits, channels, sample_formats = set(), set(), [], set()
     in_playback = False
     for raw in text.splitlines():
         line = raw.strip()
@@ -105,14 +142,18 @@ def _usb_pcm_caps(card):
         if not in_playback: continue
         if line.startswith('Channels:'): channels += _ints(line.split(':',1)[1])
         elif line.startswith('Rates:'): rates.update(x for x in _ints(line.split(':',1)[1], 8000) if x <= 768000)
-        elif line.startswith('Format:'):
+        elif line.startswith('Format:') or line.startswith('Formats:'):
             fm = line.split(':',1)[1].upper()
+            sample_formats.update(x.strip() for x in fm.replace(',', ' ').split() if x.strip())
             for b in (8,16,20,24,32,64):
                 if str(b) in fm: bits.add(b)
     return {
         'max_channels': max(channels) if channels else None,
         'sample_rates': sorted(rates), 'bit_depths': sorted(bits),
-        'capability_source': 'usb-audio-descriptor' if rates or channels or bits else 'unknown',
+        'sample_formats': sorted(sample_formats),
+        'native_dsd': any(x.startswith('DSD_') for x in sample_formats),
+        'dop_candidate': any(x in sample_formats for x in ('S24_3LE','S32_LE','S24_LE')),
+        'capability_source': 'usb-audio-descriptor' if rates or channels or bits or sample_formats else 'unknown',
     }
 
 
@@ -141,6 +182,8 @@ def capabilities():
             'alsa': f'plughw:{card},{device}',
             'raw_alsa': f'hw:{card},{device}',
             'description': line.strip(),
+            'device_family': device_family(line),
+            'card_index': card, 'device_index': device,
             'output_type': output_type,
             'digital': output_type in ('hdmi', 'spdif', 'aes3'),
             'multichannel_candidate': output_type in ('hdmi', 'usb-audio', 'aes3', 'i2s'),
@@ -273,6 +316,45 @@ def _format_key(source):
     return (rate, channels, bits, str(source.get('channel_layout') or '').lower(), raw_fmt, pcm_codec, alsa_fmt)
 
 
+def _encoded_carrier(source):
+    codec=str(source.get('codec') or '').lower()
+    profile=str(source.get('codec_profile') or '').upper()
+    if codec in ('eac3','truehd','mlp'): return 192000
+    if codec in ('dts','dca') and ('DTS-HD' in profile or 'DTS HD' in profile): return 192000
+    return int(source.get('sample_rate') or 48000) or 48000
+
+
+def _start_encoded(url, device, source, position_seconds=0.0):
+    global PLAYER, DECODER
+    actual_device=_raw_device(device); rate=_encoded_carrier(source)
+    decoder=['ffmpeg','-hide_banner','-loglevel','warning','-nostdin']
+    if float(position_seconds or 0)>0: decoder += ['-ss',f'{float(position_seconds):.3f}']
+    decoder += ['-i',url,'-map','0:a:0','-c:a','copy']
+    codec=str(source.get('codec') or '').lower(); profile=str(source.get('codec_profile') or '').upper()
+    if codec in ('dts','dca') and ('DTS-HD' in profile or 'DTS HD' in profile): decoder += ['-dtshd_rate','192000','-dtshd_fallback_time','-1']
+    decoder += ['-f','spdif','pipe:1']
+    player=['aplay','-q','-D',actual_device,'-t','raw','-f','S16_LE','-r',str(rate),'-c','2']
+    DECODER=subprocess.Popen(decoder,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    PLAYER=subprocess.Popen(player,stdin=DECODER.stdout,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    DECODER.stdout.close(); time.sleep(0.15)
+    if PLAYER.poll() is not None:
+        detail=(PLAYER.stderr.read().decode(errors='replace') if PLAYER.stderr else '') or 'HDMI/IEC61937 endpoint rejected encoded stream'
+        _terminate(DECODER); raise RuntimeError(detail.strip())
+    return actual_device, {'passthrough':True,'codec':codec,'carrier_rate':rate,'container':'IEC61937'}
+
+
+def _start_dsd(url, device, source, mode, position_seconds=0.0):
+    helper=os.getenv('SURROUNDCORE_DSD_HELPER','').strip()
+    if not helper or not os.path.isfile(helper):
+        raise RuntimeError('Native DSD/DoP route is wired but the DSD packet helper is not installed yet')
+    actual_device=_raw_device(device)
+    cmd=[helper,'--mode',mode,'--device',actual_device,'--input',url]
+    if float(position_seconds or 0)>0: cmd += ['--seek',f'{float(position_seconds):.3f}']
+    global PLAYER, DECODER
+    PLAYER=subprocess.Popen(cmd); DECODER=None
+    return actual_device, {'native_dsd':mode==NATIVE_DSD_MODE,'dop':mode==DOP_MODE,'passthrough':True}
+
+
 def _start_direct(urls, device, source, position_seconds=0.0):
     global PLAYER, DECODER, PROGRAMME_FILE
     rate, channels, bits, raw_fmt, pcm_codec, alsa_fmt = _pcm_format(source)
@@ -315,12 +397,16 @@ def _start_direct(urls, device, source, position_seconds=0.0):
 def play(url, device=None, volume=0.35, position_seconds=0.0, mode=DIRECT_MODE, source=None):
     global PLAYER, DECODER, PLAYER_STATE
     stop_player()
-    mode = mode if mode in (DIRECT_MODE, COMPAT_MODE) else DIRECT_MODE
+    mode = mode if mode in (DIRECT_MODE, COMPAT_MODE, ENCODED_MODE, NATIVE_DSD_MODE, DOP_MODE) else DIRECT_MODE
     requested_device = device or DEFAULT_DEVICE
     volume = max(0.0, min(float(volume), MAX_VOLUME))
     source = source or _probe_audio(url)
     if mode == DIRECT_MODE:
         actual_device, output = _start_direct([url], requested_device, source, position_seconds)
+    elif mode == ENCODED_MODE:
+        actual_device, output = _start_encoded(url, requested_device, source, position_seconds)
+    elif mode in (NATIVE_DSD_MODE, DOP_MODE):
+        actual_device, output = _start_dsd(url, requested_device, source, mode, position_seconds)
     else:
         actual_device = requested_device
         cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin']

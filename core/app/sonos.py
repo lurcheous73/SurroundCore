@@ -108,7 +108,7 @@ def _soap(ip, control_path, service, action, fields):
 
 
 def set_volume(zone, volume):
-    volume = max(0, min(int(volume), 49))
+    volume = max(0, min(int(volume), 100))
     ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
     if not ip:
         raise RuntimeError('Sonos coordinator IP unavailable')
@@ -143,6 +143,15 @@ def play(zone):
     return True
 
 
+def pause(zone):
+    ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip:
+        raise RuntimeError('Sonos coordinator IP unavailable')
+    service = 'urn:schemas-upnp-org:service:AVTransport:1'
+    _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'Pause', {'InstanceID': 0})
+    return True
+
+
 def seek(zone, seconds):
     ip = zone.get('capabilities', {}).get('coordinator_ip') or _ip(zone.get('address'))
     if not ip:
@@ -167,3 +176,74 @@ def stop(zone):
     service = 'urn:schemas-upnp-org:service:AVTransport:1'
     _soap(ip, '/MediaRenderer/AVTransport/Control', service, 'Stop', {'InstanceID': 0})
     return True
+
+
+def _soap_value(xml, name):
+    root=ET.fromstring(xml)
+    for node in root.iter():
+        if node.tag.rsplit('}',1)[-1] == name:
+            return node.text or ''
+    return ''
+
+def get_volume(zone):
+    ip=zone.get('capabilities',{}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip: raise RuntimeError('Sonos coordinator IP unavailable')
+    try:
+        svc='urn:schemas-upnp-org:service:GroupRenderingControl:1'
+        raw=_soap(ip,'/MediaRenderer/GroupRenderingControl/Control',svc,'GetGroupVolume',{'InstanceID':0})
+        return int(_soap_value(raw,'CurrentVolume') or 0)
+    except Exception:
+        svc='urn:schemas-upnp-org:service:RenderingControl:1'
+        raw=_soap(ip,'/MediaRenderer/RenderingControl/Control',svc,'GetVolume',{'InstanceID':0,'Channel':'Master'})
+        return int(_soap_value(raw,'CurrentVolume') or 0)
+
+
+def set_mute(zone, muted):
+    ip=zone.get('capabilities',{}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip: raise RuntimeError('Sonos coordinator IP unavailable')
+    desired=1 if muted else 0
+    try:
+        svc='urn:schemas-upnp-org:service:GroupRenderingControl:1'
+        _soap(ip,'/MediaRenderer/GroupRenderingControl/Control',svc,'SetGroupMute',{'InstanceID':0,'DesiredMute':desired})
+    except Exception:
+        svc='urn:schemas-upnp-org:service:RenderingControl:1'
+        for member_ip in zone.get('capabilities',{}).get('member_ips') or [ip]:
+            _soap(member_ip,'/MediaRenderer/RenderingControl/Control',svc,'SetMute',{'InstanceID':0,'Channel':'Master','DesiredMute':desired})
+    return bool(desired)
+
+def get_mute(zone):
+    ip=zone.get('capabilities',{}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip: raise RuntimeError('Sonos coordinator IP unavailable')
+    try:
+        svc='urn:schemas-upnp-org:service:GroupRenderingControl:1'
+        raw=_soap(ip,'/MediaRenderer/GroupRenderingControl/Control',svc,'GetGroupMute',{'InstanceID':0})
+        return _soap_value(raw,'CurrentMute') in ('1','true','True')
+    except Exception:
+        svc='urn:schemas-upnp-org:service:RenderingControl:1'
+        raw=_soap(ip,'/MediaRenderer/RenderingControl/Control',svc,'GetMute',{'InstanceID':0,'Channel':'Master'})
+        return _soap_value(raw,'CurrentMute') in ('1','true','True')
+
+
+def state(zone):
+    ip=zone.get('capabilities',{}).get('coordinator_ip') or _ip(zone.get('address'))
+    if not ip: raise RuntimeError('Sonos coordinator IP unavailable')
+    svc='urn:schemas-upnp-org:service:AVTransport:1'
+    pos=_soap(ip,'/MediaRenderer/AVTransport/Control',svc,'GetPositionInfo',{'InstanceID':0})
+    tr=_soap(ip,'/MediaRenderer/AVTransport/Control',svc,'GetTransportInfo',{'InstanceID':0})
+    metadata=_soap_value(pos,'TrackMetaData')
+    title=''; stream=''; artist=''; album=''
+    if metadata:
+        try:
+            md=ET.fromstring(html.unescape(metadata))
+            for node in md.iter():
+                key=node.tag.rsplit('}',1)[-1]
+                text=(node.text or '').strip()
+                if key=='title' and not title: title=text
+                elif key=='streamContent' and not stream: stream=text
+                elif key in ('creator','artist') and not artist: artist=text
+                elif key=='album' and not album: album=text
+        except Exception:
+            pass
+    return {'state':_soap_value(tr,'CurrentTransportState') or 'UNKNOWN','volume':get_volume(zone),
+            'muted':get_mute(zone),'title':title,'stream_content':stream,'artist':artist,'album':album,
+            'uri':_soap_value(pos,'TrackURI'),'rel_time':_soap_value(pos,'RelTime'),'duration':_soap_value(pos,'TrackDuration')}

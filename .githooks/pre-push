@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+repo=$(git rev-parse --show-toplevel)
+cd "$repo"
+python3 scripts/check-secrets.py
+hits=$(git grep -IlE "(spak_[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)" $(git rev-list --all) 2>/dev/null || true)
+if [ -n "$hits" ]; then
+  echo "SECRET CHECK FAILED: credential signature exists in Git history" >&2
+  echo "$hits" | sed -E "s/^([0-9a-f]{8})[0-9a-f]*:/  \1:/" | cut -d: -f1,2 >&2
+  exit 1
+fi
+echo "Git history secret check OK"
