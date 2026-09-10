@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2026 SurroundCore contributors
-# Author: lurcheous73
+# Copyright (c) 2026 Christopher Swain
+# Author: Kev n Chris
+# License: SurroundCore No-Commercial-Exploitation Licence (SC-NCE) 1.2
 # Source: https://github.com/lurcheous73/SurroundCore
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
@@ -43,7 +44,7 @@ UV_PYTHON="3.13" setup_uv
 fetch_and_deploy_gh_branch \
   "surroundcore" \
   "lurcheous73/SurroundCore" \
-  "feature/proxmox-ct-install" \
+  "proxmox-ct" \
   "/opt/surroundcore"
 
 msg_info "Installing Python Dependencies"
