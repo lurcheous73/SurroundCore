@@ -2,7 +2,7 @@
 
 This document defines the Proxmox VE installation and removable-media model for SurroundCore.
 
-The implementation on `feature/proxmox-ct-install` follows the structure and conventions used by the Community Scripts development repository (`community-scripts/ProxmoxVED`) and its shared `community-scripts/core` engine.
+The implementation on the `proxmox-ct` branch follows the structure and conventions used by the Community Scripts development repository (`community-scripts/ProxmoxVED`) and its shared `community-scripts/core` engine.
 
 ## Installation model
 
@@ -65,7 +65,7 @@ An accepted USB optical drive is passed as a device set rather than as `/dev/sr0
 
 The `/dev/sr*` and `/dev/sg*` numbers are not treated as stable identities.
 
-Rip and burn use the same accepted-device registry. A drive accepted for SurroundCore must therefore appear consistently on both the Rip and Burn pages.
+Rip and Burn use the same accepted-device registry. A drive accepted for SurroundCore must therefore appear consistently on both pages.
 
 ## USB storage
 
@@ -104,6 +104,6 @@ Installers may create local configuration containing secrets at runtime, with re
 
 ## Development status
 
-The Community Scripts compatible native CT installer is being developed on `feature/proxmox-ct-install`.
+The stable Proxmox installation track is the `proxmox-ct` branch. Community-Scripts-shaped development can still be done on temporary feature branches before being folded into this branch.
 
-The media broker API/UI and host daemon are the next implementation stage. Until that is complete, existing development machines may still have manual/static device mappings; those mappings are not the intended final installation model.
+The media broker API/UI and host daemon remain active development. Until that is complete, development machines may still have manual/static device mappings; those mappings are not the intended final installation model.
