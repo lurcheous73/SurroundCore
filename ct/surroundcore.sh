@@ -38,12 +38,14 @@ function update_script() {
     systemctl stop surroundcore surroundcore-ingest 2>/dev/null || true
     msg_ok "Stopped SurroundCore"
 
-    create_backup /opt/surroundcore/.env /var/lib/surroundcore
+    create_backup /opt/surroundcore/.env /etc/surroundcore /var/lib/surroundcore
     CLEAN_INSTALL=1 fetch_and_deploy_gh_branch "surroundcore" "lurcheous73/SurroundCore" "proxmox-ct" "/opt/surroundcore"
     restore_backup
 
     msg_info "Updating Python Dependencies"
-    /opt/surroundcore/venv/bin/pip install --quiet --upgrade -r /opt/surroundcore/core/requirements.txt -r /opt/surroundcore/ingest/requirements.txt
+    $STD uv pip install --python /opt/surroundcore/.venv/bin/python \
+      -r /opt/surroundcore/core/requirements.txt \
+      -r /opt/surroundcore/ingest/requirements.txt
     msg_ok "Updated Python Dependencies"
 
     if [[ -d /opt/surroundcore/ingest/netmd ]]; then
