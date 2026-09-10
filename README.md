@@ -1,137 +1,95 @@
-# SurroundCore
+# SurroundCore — Proxmox CT
 
-SurroundCore is a Debian 13-only multichannel music core and endpoint system intended to sit alongside Meridian/Sooloos and be controlled by modern clients such as ControlMac 2026.
+**SurroundCore — created by Kev n Chris.**
 
-Current status: **v0.5 development / developer preview**. Storage, synchronized playback, optical ingest and streaming providers are being developed as one system.
+This branch is the supported **Proxmox VE privileged LXC** build of SurroundCore.
 
-## Goals
+It follows the current Community Scripts / ProxmoxVED structure: the Proxmox host creates the CT, while SurroundCore itself is installed **natively inside Debian 13** using systemd services rather than Docker-in-LXC.
 
-- Preserve and catalogue stereo, quad, 5.0, 5.1 and 7.1 music editions.
-- Play multichannel PCM/FLAC over local or remote HDMI/ALSA endpoints.
-- Keep original DSF/DFF/MKA/MKV assets available for later native/bitstream support.
-- Discover network endpoints, beginning with Sonos UPnP topology.
-- Treat bonded Sonos speaker sets as one logical zone with explicit channel roles.
-- Support multiple local, USB, NFS, SMB/CIFS and rclone-backed library sources with optional read-through/pinned cache.
-- Provide a small authenticated HTTP API for ControlMac and other clients.
-- Run the Core in Docker while keeping physical ALSA/HDMI playback in a native endpoint agent.
+## Why privileged?
 
-## Storage foundation (v0.4 development)
+Optical ingest and MakeMKV require low-level SCSI access to the optical block device and its matching generic SCSI device, for example `/dev/sr0` and `/dev/sg10`. Testing showed that an unprivileged LXC can expose `/dev/sr0` while still blocking the SCSI ioctls MakeMKV requires.
 
-SurroundCore now separates **library sources** from **playback endpoints**. The Docker host owns mounts and credentials; the Core receives media read-only and can cache selected files locally for reliable playback.
+For that reason this build intentionally creates a **privileged** container.
 
-- Local/USB/NFS/SMB-CIFS/rclone source registration
-- Read-through and pinned cache policies with LRU/free-space limits
-- Cached media remains playable when a read-through source goes offline
-- Host-side `surround-storage` helper keeps SMB/cloud credentials out of the playback container
-- Plex is a reserved source kind; its provider adapter is not implemented yet
+## Install
 
-See `docs/STORAGE.md` for the source, mount and cache model.
+Run on the Proxmox VE host:
 
-## Streaming providers (v0.5 development)
+```bash
+git clone --branch proxmox-ct https://github.com/lurcheous73/SurroundCore.git
+cd SurroundCore
+bash ct/surroundcore.sh
+```
 
-SurroundCore now owns streaming configuration and quality negotiation; ControlMac remains a control surface.
+The Community-Scripts-style installer creates a Debian 13 CT and installs:
 
-- Core-hosted setup page at `/setup/streaming`
-- Provider-neutral streaming API and saved Internet Radio stations
-- Bandcamp Subsonic account/purchased-library adapter with Core-side credential proxying
-- Native RSS/Atom podcast feed and episode playback
-- Official Spotify Soloist control surface (user-supplied binary/API key)
-- Sonos OAuth + Sonos Radio/Favorites control on Sonos groups
-- Licensed-provider bridge contract for TIDAL, Qobuz, HDtracks/AIRIA, Apple Music and Audible
-- Highest-native/lossless-first source policy with downsample/downmix disabled by default
-- MQA pass-through policy for legacy/provider-supplied MQA
-- Optional licensed AIRIA helper detection (AIRIA is never claimed when no module is installed)
-- Meridian output negotiation prefers MHR for stereo and MMHR for multichannel only when an endpoint actually advertises those transports
-- Generic ALSA endpoints explicitly advertise PCM rather than pretending to support Meridian transports
+- SurroundCore Core on TCP 8080
+- SurroundCore optical/media ingest service
+- FFmpeg and lossless audio tools
+- CD/DVD/Blu-ray discovery/ripping utilities
+- optical burning utilities
+- NetMD dependencies
+- systemd services and persistent configuration
 
-See `docs/STREAMING.md` for provider status and the implemented/pending boundary.
+The application itself is installed under `/opt/surroundcore`; persistent configuration is under `/etc/surroundcore` and data under `/var/lib/surroundcore`.
 
-## Required platform
+## Music library
 
-**Debian 13 (Trixie) only.**
+If the CT is expected to rip/import media into the main library, the music dataset must be mounted **read/write**:
 
-The installer intentionally refuses Debian 12, Ubuntu and other distributions. The Core container is also built from `debian:13-slim` so the host, CT/VM and container share one supported baseline.
+```bash
+./proxmox/add-media-bind.sh CTID /path/to/music /srv/surroundcore/media
+```
 
-Supported deployment targets:
+Pass `ro` as the fourth argument only when a deliberately read-only library is wanted.
 
-- Proxmox VE LXC (recommended for the Core)
-- Debian 13 VM
-- Debian 13 bare metal/NAS
-- Debian 13 Pi/NUC endpoint
+## USB and optical media
 
-## Architecture
+`tools/pve/surroundcore-media-broker.sh` is the host-side foundation for controlled removable-media hand-off.
+
+The intended finished flow is:
 
 ```text
-ControlMac / API client
+USB/optical device connected to Proxmox host
         |
         v
-SurroundCore (Docker, TCP 8080)
-  - multi-source library scanner / FFprobe
-  - SQLite catalogue + source registry
-  - read-through/pinned media cache
-  - endpoint registry + synchronized groups
-  - Sonos / mDNS / UPnP discovery
-  - streaming-provider and quality policy layer
-  - authenticated media streaming
+safe-device check
         |
-        +-----------------------+
-        |                       |
-        v                       v
-local endpoint agent       remote endpoint agent
-(native systemd)           Pi / NUC / Debian
-        |                       |
-      ALSA                    ALSA
-        |                       |
- HDMI / USB / sound card   HDMI / USB / sound card
+        v
+SurroundCore web prompt: Add this device to SurroundCore?
+        |                               |
+       Yes                              No
+        |                               |
+live attach to CT                 remain on host
+        |
+      unplug
+        |
+live detach from CT
 ```
 
-The Core uses host networking so SSDP/multicast discovery works correctly. Physical audio remains outside Docker; this avoids unnecessary device/hotplug complexity and allows ALSA to claim the selected output directly.
+The broker must never offer mounted devices, active ZFS/LVM members, Proxmox storage devices, or other host-critical disks for hand-off.
 
-## Quick install on Debian 13
+## MakeMKV
 
-```bash
-git clone https://github.com/lurcheous73/SurroundCore.git
-cd SurroundCore
-sudo ./install.sh
+MakeMKV belongs **inside this privileged CT**, not on the Proxmox host. SurroundCore does not redistribute MakeMKV binaries or licence keys; `/opt/surroundcore-makemkv` is reserved for the locally installed vendor CLI.
+
+The ingest configuration expects:
+
+```text
+SURROUNDCORE_MAKEMKVCON=/opt/surroundcore-makemkv/makemkvcon
 ```
 
-## Proxmox CT
+## Other installation tracks
 
-The helper creates an unprivileged Debian 13 CT with nesting enabled for Docker:
+- `debian13` — clean native Debian 13 Core install
+- `endpoint` — playback-only endpoint
+- `main` — integrated development baseline
 
-```bash
-CTID=700 STORAGE=NVME-512-ZFS BRIDGE=vmbr0 IPCFG=ip=dhcp ./proxmox/create-ct.sh
-```
+## Licence
 
-For a tagged network, edit/pass the CT network with the required VLAN tag using `pct set`; the reference deployment uses VLAN 30.
-
-Media should normally be mounted read-only into the CT from the host dataset:
-
-```bash
-./proxmox/add-media-bind.sh 700 /path/to/music-surround
-```
-
-See `docs/SHARES.md` for host mounts and `docs/STORAGE.md` for multi-source/cache configuration.
-
-## API
-
-FastAPI documentation is available from `http://CORE:8080/docs`. Main API families are:
-
-- `/api/v1/endpoints` — discovered/registered playback endpoints
-- `/api/v1/groups` — synchronized playback groups
-- `/api/v1/library` and `/api/v1/media/...` — indexed media and authenticated streaming
-- `/api/v1/sources` — multi-source storage, scans and cache management
-- `/api/v1/streaming` and `/api/v1/providers/...` — streaming quality/providers/accounts
-- `/api/v1/sonos/...` — Sonos playback compatibility
-
-A random shared token is generated by `install.sh`. Protected calls use `Authorization: Bearer <token>`; media streams can also receive the token as a query parameter for endpoint playback.
+SurroundCore uses the **SC-NCE 1.2** licence. Home, staff-enjoyment and free ambient/background use in UK pubs and restaurants is permitted. Commercial exploitation, rebadging, paid customer features and hotel guest-room/in-room use require prior permission. See `LICENSE` for the exact terms.
 
 ## Support
 
-For installation problems, reproducible bugs and feature requests, use [GitHub Issues](https://github.com/lurcheous73/SurroundCore/issues).
-
-For direct support enquiries, email [surroundcore@brimstoncottage.uk](mailto:surroundcore@brimstoncottage.uk).
-
-Please remove passwords, API keys, OAuth tokens and other credentials before posting logs publicly.
-
-See [SUPPORT.md](SUPPORT.md) for what to include in a support request and the current support scope.
+GitHub Issues are preferred for reproducible bugs and feature requests. Private support: `surroundcore@brimstoncottage.uk`.
