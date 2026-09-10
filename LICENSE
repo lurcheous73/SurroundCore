@@ -1,36 +1,84 @@
-SurroundCore — Fucking Go For It License (FGFI), Version 1.0
+SurroundCore Non-Commercial Licence (SC-NC), Version 1.0
 
 Copyright (c) 2026 Christopher Swain
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to use,
-copy, modify, merge, publish, distribute, sublicense, host, fork, build upon,
-and/or sell copies of the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following conditions:
+SurroundCore — created by Kev n Chris.
 
-1. The above copyright notice and this permission notice must be included in
-   all substantial copies or distributions of the Software or its source code.
+Permission is granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to use, copy,
+run, study, modify, fork, and redistribute the Software, including modified
+versions, solely for non-commercial purposes and subject to the conditions
+below.
 
-2. Public redistributions, derived projects, products, documentation, About
-   pages, or credits should reasonably acknowledge the original project using
-   wording substantially similar to:
+1. NON-COMMERCIAL USE ONLY
 
-   "SurroundCore — created by Kev n Chris."
+The Software may not be used for any commercial purpose without prior written
+permission from Christopher Swain.
 
-   Equivalent wording is fine. The point is simple: go for it, but acknowledge
-   where the project came from.
+Commercial use includes, without limitation:
 
-3. You may license your modifications or derived works under different terms,
-   provided the notices and acknowledgement required above are preserved for
-   the portions derived from SurroundCore.
+- selling, renting, licensing, sublicensing, or otherwise supplying the
+  Software or a modified version for payment or commercial advantage;
+- including the Software or a modified version in hardware, software, a
+  subscription, service, appliance, product, or package that is sold,
+  licensed, rented, monetised, or supplied commercially;
+- charging for hosted or managed access to the Software;
+- charging for support, installation, integration, modification, or operation
+  of the Software as part of a commercial offering;
+- using the Software in the ordinary operations of a commercial business where
+  that use provides a commercial benefit, revenue, or competitive advantage.
+
+Personal use, hobby use, private experimentation, education, non-commercial
+research, and genuinely non-commercial community or charitable use are
+permitted.
+
+2. COPYING, MODIFICATION, AND REDISTRIBUTION
+
+You may copy, modify, fork, and redistribute the Software for permitted
+non-commercial purposes. Redistributed copies and derived works must remain
+subject to this licence for all portions derived from SurroundCore.
+
+You may not remove these non-commercial restrictions from a derived work or
+relicense a derived work in a way that permits commercial use of the portions
+derived from SurroundCore.
+
+3. ATTRIBUTION
+
+Any substantial copy, redistribution, modified version, public fork,
+documentation, About page, or credits must retain the copyright notice, this
+licence, and a reasonable acknowledgement substantially similar to:
+
+    SurroundCore — created by Kev n Chris.
+
+Equivalent wording is fine provided Kev n Chris remain clearly acknowledged.
+
+4. COMMERCIAL LICENSING
+
+Nothing in this licence prevents the copyright holder from granting a separate
+commercial licence. Anyone wanting commercial use must obtain prior written
+permission from Christopher Swain.
+
+5. CONTRIBUTIONS
+
+Unless explicitly agreed otherwise in writing, contributions intentionally
+submitted to the SurroundCore project for inclusion in the Software are made
+available under this same licence.
+
+6. THIRD-PARTY SOFTWARE
+
+Third-party software, libraries, codecs, tools, services, firmware, and other
+components retain their own licences and terms. This licence applies only to
+SurroundCore material for which Christopher Swain holds the relevant rights.
+
+7. NO WARRANTY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS, COPYRIGHT HOLDER, CONTRIBUTORS OR DEVELOPMENT ASSISTANTS BE LIABLE
-FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
-THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED
+BY LAW, THE COPYRIGHT HOLDER AND CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY
+CLAIM, DAMAGES, LOSS, OR OTHER LIABILITY ARISING FROM OR IN CONNECTION WITH
+THE SOFTWARE OR ITS USE.
 
-In less legal English: use it, improve it, fork it, build things with it, sell
-things with it if you want — fucking go for it. Just acknowledge Kev n Chris.
+In less legal English: copy it, run it, learn from it, fork it, improve it and
+share it non-commercially. Just acknowledge Kev n Chris. If money or commercial
+advantage is involved, ask Chris first.
