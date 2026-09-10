@@ -1,5 +1,7 @@
 import hmac
+import hashlib
 import json
+import re
 import os
 import time
 import urllib.parse
@@ -13,7 +15,7 @@ from pydantic import BaseModel, Field
 from .sonos import endpoints as sonos_endpoints, play_uri as sonos_play_uri, set_volume as sonos_set_volume, stop as sonos_stop
 from .mdns_endpoints import endpoints as mdns_endpoints
 from .upnp import endpoints as upnp_endpoints
-from .media import scan
+from .media import AUDIO_EXT, probe, scan
 from .streaming import (ranged_file, stereo_flac_cache, stereo_flac_program_cache,
                         load_settings, save_settings, load_provider_secrets, save_provider_secret)
 from .providers import provider_status, quality_policy
@@ -851,6 +853,50 @@ def library_scan(path: str = Query(default=None), authorization: str | None = He
             upsert_media(item)
     return {'root': root, 'scanned': len(items), 'items': items}
 
+
+def _safe_import_component(value: str, fallback: str) -> str:
+    value=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','-',(value or '').strip())
+    value=re.sub(r'\s+',' ',value).strip(' .')
+    return (value[:160] or fallback)
+
+def _sha256_file(path):
+    digest=hashlib.sha256()
+    with open(path,'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024*1024), b''): digest.update(chunk)
+    return digest.hexdigest()
+
+@app.put('/api/v1/library/import')
+async def library_import(request: Request, artist: str = Query(default='Unknown Artist'),
+                         album: str = Query(default='Unknown Album'), filename: str = Query(...),
+                         authorization: str | None = Header(default=None),
+                         x_content_sha256: str | None = Header(default=None)):
+    _require_token(authorization)
+    ext=Path(filename).suffix.lower()
+    if ext not in AUDIO_EXT: raise HTTPException(400,'Unsupported audio file type')
+    root=Path(os.getenv('SURROUNDCORE_MEDIA','/media')) / 'Imported'
+    folder=root / _safe_import_component(artist,'Unknown Artist') / _safe_import_component(album,'Unknown Album')
+    folder.mkdir(parents=True,exist_ok=True)
+    dst=folder / _safe_import_component(Path(filename).name,'track'+ext)
+    tmp=dst.with_name(dst.name+'.part')
+    if dst.exists():
+        existing=_sha256_file(dst)
+        if x_content_sha256 and hmac.compare_digest(existing,x_content_sha256.lower()):
+            item=probe(dst); upsert_media(item); return {'ok':True,'already_present':True,'sha256':existing,'item':item}
+        raise HTTPException(409,'A different file already exists at the import destination')
+    digest=hashlib.sha256(); size=0
+    try:
+        with tmp.open('wb') as out:
+            async for chunk in request.stream():
+                if chunk: out.write(chunk); digest.update(chunk); size+=len(chunk)
+        actual=digest.hexdigest()
+        if x_content_sha256 and not hmac.compare_digest(actual,x_content_sha256.lower()):
+            raise HTTPException(422,'Uploaded audio checksum mismatch')
+        tmp.replace(dst)
+        item=probe(dst); upsert_media(item)
+        return {'ok':True,'already_present':False,'bytes':size,'sha256':actual,'item':item}
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 @app.get('/api/v1/library')
 def library(authorization: str | None = Header(default=None)):
