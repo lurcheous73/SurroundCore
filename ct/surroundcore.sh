@@ -5,7 +5,7 @@ source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_
 
 # Copyright (c) 2026 Christopher Swain
 # Author: Kev n Chris
-# License: SurroundCore Non-Commercial Licence (SC-NC) 1.0
+# License: SurroundCore No-Commercial-Exploitation Licence (SC-NCE) 1.1
 # Source: https://github.com/lurcheous73/SurroundCore
 
 APP="SurroundCore"
