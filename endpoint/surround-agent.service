@@ -1,14 +1,15 @@
 [Unit]
-Description=SurroundCore ALSA/HDMI endpoint
+Description=SurroundCore ALSA/HDMI Endpoint
 After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
-EnvironmentFile=/opt/surroundcore/.env
+Type=simple
+User=root
+EnvironmentFile=/etc/surroundcore/endpoint.env
 ExecStart=/usr/local/lib/surroundcore/surround-agent.py --listen 0.0.0.0 --port 8090
 Restart=on-failure
 RestartSec=2
-User=root
 
 [Install]
 WantedBy=multi-user.target
