@@ -15,17 +15,12 @@ is furnished to do so, subject to the following conditions:
    pages, or credits should reasonably acknowledge the original project using
    wording substantially similar to:
 
-   "SurroundCore — created by Chris Swain, with development assistance from
-   Kev (ChatGPT/OpenAI)."
+   "SurroundCore — created by Kev n Chris."
 
    Equivalent wording is fine. The point is simple: go for it, but acknowledge
    where the project came from.
 
-3. The acknowledgement of ChatGPT/OpenAI describes development assistance
-   only. It does not imply sponsorship, certification, affiliation, approval,
-   or endorsement by OpenAI.
-
-4. You may license your modifications or derived works under different terms,
+3. You may license your modifications or derived works under different terms,
    provided the notices and acknowledgement required above are preserved for
    the portions derived from SurroundCore.
 
@@ -38,4 +33,4 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
 THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 In less legal English: use it, improve it, fork it, build things with it, sell
-things with it if you want — fucking go for it. Just acknowledge Chris and Kev.
+things with it if you want — fucking go for it. Just acknowledge Kev n Chris.
