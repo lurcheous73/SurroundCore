@@ -1,137 +1,68 @@
-# SurroundCore
+# SurroundCore — Endpoint
 
-SurroundCore is a Debian 13-only multichannel music core and endpoint system intended to sit alongside Meridian/Sooloos and be controlled by modern clients such as ControlMac 2026.
+**SurroundCore — created by Kev n Chris.**
 
-Current status: **v0.5 development / developer preview**. Storage, synchronized playback, optical ingest and streaming providers are being developed as one system.
+This branch is the lightweight **playback-only SurroundCore endpoint** for Debian 13 machines such as Raspberry Pi, NUC, small PCs and remote audio boxes.
 
-## Goals
+It does **not** install the SurroundCore Core, database, storage layer, streaming-provider configuration or optical ingest service. It only exposes local ALSA/HDMI/USB audio hardware to an existing SurroundCore Core.
 
-- Preserve and catalogue stereo, quad, 5.0, 5.1 and 7.1 music editions.
-- Play multichannel PCM/FLAC over local or remote HDMI/ALSA endpoints.
-- Keep original DSF/DFF/MKA/MKV assets available for later native/bitstream support.
-- Discover network endpoints, beginning with Sonos UPnP topology.
-- Treat bonded Sonos speaker sets as one logical zone with explicit channel roles.
-- Support multiple local, USB, NFS, SMB/CIFS and rclone-backed library sources with optional read-through/pinned cache.
-- Provide a small authenticated HTTP API for ControlMac and other clients.
-- Run the Core in Docker while keeping physical ALSA/HDMI playback in a native endpoint agent.
+## Requirements
 
-## Storage foundation (v0.4 development)
+- Debian 13 (Trixie)
+- amd64 or arm64
+- working ALSA audio hardware
+- network access to an existing SurroundCore Core
+- the Core URL and shared SurroundCore token
 
-SurroundCore now separates **library sources** from **playback endpoints**. The Docker host owns mounts and credentials; the Core receives media read-only and can cache selected files locally for reliable playback.
+## Install
 
-- Local/USB/NFS/SMB-CIFS/rclone source registration
-- Read-through and pinned cache policies with LRU/free-space limits
-- Cached media remains playable when a read-through source goes offline
-- Host-side `surround-storage` helper keeps SMB/cloud credentials out of the playback container
-- Plex is a reserved source kind; its provider adapter is not implemented yet
+```bash
+git clone --branch endpoint https://github.com/lurcheous73/SurroundCore.git
+cd SurroundCore
+sudo CORE_URL=http://CORE-IP:8080 TOKEN=YOUR_TOKEN ./install-endpoint.sh
+```
 
-See `docs/STORAGE.md` for the source, mount and cache model.
+Optional values:
 
-## Streaming providers (v0.5 development)
+```bash
+sudo \
+  CORE_URL=http://CORE-IP:8080 \
+  TOKEN=YOUR_TOKEN \
+  NAME="Living Room" \
+  DEVICE=default \
+  ./install-endpoint.sh
+```
 
-SurroundCore now owns streaming configuration and quality negotiation; ControlMac remains a control surface.
-
-- Core-hosted setup page at `/setup/streaming`
-- Provider-neutral streaming API and saved Internet Radio stations
-- Bandcamp Subsonic account/purchased-library adapter with Core-side credential proxying
-- Native RSS/Atom podcast feed and episode playback
-- Official Spotify Soloist control surface (user-supplied binary/API key)
-- Sonos OAuth + Sonos Radio/Favorites control on Sonos groups
-- Licensed-provider bridge contract for TIDAL, Qobuz, HDtracks/AIRIA, Apple Music and Audible
-- Highest-native/lossless-first source policy with downsample/downmix disabled by default
-- MQA pass-through policy for legacy/provider-supplied MQA
-- Optional licensed AIRIA helper detection (AIRIA is never claimed when no module is installed)
-- Meridian output negotiation prefers MHR for stereo and MMHR for multichannel only when an endpoint actually advertises those transports
-- Generic ALSA endpoints explicitly advertise PCM rather than pretending to support Meridian transports
-
-See `docs/STREAMING.md` for provider status and the implemented/pending boundary.
-
-## Required platform
-
-**Debian 13 (Trixie) only.**
-
-The installer intentionally refuses Debian 12, Ubuntu and other distributions. The Core container is also built from `debian:13-slim` so the host, CT/VM and container share one supported baseline.
-
-Supported deployment targets:
-
-- Proxmox VE LXC (recommended for the Core)
-- Debian 13 VM
-- Debian 13 bare metal/NAS
-- Debian 13 Pi/NUC endpoint
-
-## Architecture
+The endpoint installs:
 
 ```text
-ControlMac / API client
-        |
-        v
-SurroundCore (Docker, TCP 8080)
-  - multi-source library scanner / FFprobe
-  - SQLite catalogue + source registry
-  - read-through/pinned media cache
-  - endpoint registry + synchronized groups
-  - Sonos / mDNS / UPnP discovery
-  - streaming-provider and quality policy layer
-  - authenticated media streaming
-        |
-        +-----------------------+
-        |                       |
-        v                       v
-local endpoint agent       remote endpoint agent
-(native systemd)           Pi / NUC / Debian
-        |                       |
-      ALSA                    ALSA
-        |                       |
- HDMI / USB / sound card   HDMI / USB / sound card
+/usr/local/lib/surroundcore/surround-agent.py
+/etc/surroundcore/endpoint.env
+/etc/systemd/system/surround-agent.service
 ```
 
-The Core uses host networking so SSDP/multicast discovery works correctly. Physical audio remains outside Docker; this avoids unnecessary device/hotplug complexity and allows ALSA to claim the selected output directly.
+The control API listens on TCP **8090**. Capabilities are available at:
 
-## Quick install on Debian 13
-
-```bash
-git clone https://github.com/lurcheous73/SurroundCore.git
-cd SurroundCore
-sudo ./install.sh
+```text
+http://ENDPOINT-IP:8090/v1/capabilities
 ```
 
-## Proxmox CT
+## Audio hardware
 
-The helper creates an unprivileged Debian 13 CT with nesting enabled for Docker:
+The installer reports `aplay -l` after installation. `DEVICE=default` is suitable for many systems; a specific ALSA device can be supplied when needed.
 
-```bash
-CTID=700 STORAGE=NVME-512-ZFS BRIDGE=vmbr0 IPCFG=ip=dhcp ./proxmox/create-ct.sh
-```
+The endpoint is intended to support HDMI, USB audio, S/PDIF/AES and other ALSA-visible outputs according to the capabilities detected by `surround-agent.py`.
 
-For a tagged network, edit/pass the CT network with the required VLAN tag using `pct set`; the reference deployment uses VLAN 30.
+## Other installation tracks
 
-Media should normally be mounted read-only into the CT from the host dataset:
+- `debian13` — clean native Debian 13 SurroundCore Core + ingest
+- `proxmox-ct` — privileged Debian 13 Proxmox LXC Core + ingest
+- `main` — integrated development baseline
 
-```bash
-./proxmox/add-media-bind.sh 700 /path/to/music-surround
-```
+## Licence
 
-See `docs/SHARES.md` for host mounts and `docs/STORAGE.md` for multi-source/cache configuration.
-
-## API
-
-FastAPI documentation is available from `http://CORE:8080/docs`. Main API families are:
-
-- `/api/v1/endpoints` — discovered/registered playback endpoints
-- `/api/v1/groups` — synchronized playback groups
-- `/api/v1/library` and `/api/v1/media/...` — indexed media and authenticated streaming
-- `/api/v1/sources` — multi-source storage, scans and cache management
-- `/api/v1/streaming` and `/api/v1/providers/...` — streaming quality/providers/accounts
-- `/api/v1/sonos/...` — Sonos playback compatibility
-
-A random shared token is generated by `install.sh`. Protected calls use `Authorization: Bearer <token>`; media streams can also receive the token as a query parameter for endpoint playback.
+SurroundCore uses the **SC-NCE 1.2** licence. Home use, staff-enjoyment use, and free background/ambient use in UK pubs and restaurants are permitted. Selling/rebadging SurroundCore, paid customer features and hotel guest-room/in-room use require prior permission. See `LICENSE` for the exact terms.
 
 ## Support
 
-For installation problems, reproducible bugs and feature requests, use [GitHub Issues](https://github.com/lurcheous73/SurroundCore/issues).
-
-For direct support enquiries, email [surroundcore@brimstoncottage.uk](mailto:surroundcore@brimstoncottage.uk).
-
-Please remove passwords, API keys, OAuth tokens and other credentials before posting logs publicly.
-
-See [SUPPORT.md](SUPPORT.md) for what to include in a support request and the current support scope.
+GitHub Issues are preferred for reproducible bugs and feature requests. Private support: `surroundcore@brimstoncottage.uk`.
