@@ -30,15 +30,17 @@ from .podcasts import fetch_feed as fetch_podcast_feed
 from .quality import output_route, source_request, pcm_playback_plan
 from .playback import play_url, stop as stop_endpoint, status as endpoint_status
 from .webui import streaming_setup_html
+from .feature_routes import router as feature_router
 from .sources import (SOURCE_KINDS, CACHE_POLICIES, validate_source, source_status,
                       media_path, cache_file, purge_source_cache, cache_stats)
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
                  save_group, list_groups, get_group, delete_group, update_group_latency,
                  save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
-from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols
+from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols, catalog, output_profiles, transport
 
 app = FastAPI(title='SurroundCore', version='0.5.0-dev')
+app.include_router(feature_router)
 
 _ENDPOINT_CACHE={'at':0.0,'items':[]}
 _ENDPOINT_CACHE_LOCK=threading.Lock()
@@ -247,6 +249,7 @@ class QueueAddInput(BaseModel):
 def startup():
     init_db()
     userauth.init_auth_db()
+    catalog.init_catalog()
     try:
         cfg=(load_provider_secrets().get('spotify') or {})
         if cfg.get('api_key') and spotify_soloist.binary(cfg):
@@ -366,7 +369,9 @@ def _logical_zones(user):
         host=_endpoint_host(endpoint); name=str(endpoint.get('name') or endpoint.get('id') or 'Zone'); base=name.removesuffix(' (L)').removesuffix(' (R)')
         key=host or base.casefold(); groups.setdefault(key,{'name':base,'host':host,'key':key,'endpoints':[]})['endpoints'].append(endpoint)
     for group in groups.values():
-        wanted=prefs.get(group['key'])
+        profile=output_profiles.get_profile(group['key'])
+        wanted=profile.get('transport') or prefs.get(group['key'])
+        if profile.get('name'): group['name']=profile['name']
         eps=sorted(group['endpoints'],key=lambda e:(0 if wanted and e.get('kind')==wanted else 1, protocols.rank(e.get('kind'))))
         preferred=eps[0]; kinds=[]
         for e in eps:
@@ -646,70 +651,18 @@ def _external_media(title, url):
 
 
 def _play_external(endpoint, url, device='default', volume=None, title='Stream', source='stream'):
-    kind=endpoint.get('kind')
     endpoint_id=endpoint.get('id')
-    if kind=='sonos':
-        if volume is not None: sonos_set_volume(endpoint, round(max(0.0,min(float(volume),1.0))*100))
-        sonos_uri=url
-        if source=='radio' and url.startswith('http://') and not _radio_is_hls(url): sonos_uri='x-rincon-mp3radio://'+url[7:]
-        sonos_play_uri(endpoint,sonos_uri)
-        v=sonos_get_volume(endpoint)
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'sonos-native','transport':'sonos','source_url':url,'transport_uri':sonos_uri})
-        return {'ok':True,'transport':'sonos','volume':v,'session':session}
-    if kind=='airplay':
-        media=_external_media(title,url)
-        result=airplay.play(endpoint,url,media,0.0,0.35 if volume is None else volume)
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'airplay-native-realtime','transport':'airplay2'})
-        return {'ok':True,'transport':'airplay2','result':result,'session':session}
-    if kind=='upnp':
-        upnp_play_uri(endpoint,url)
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'upnp-native','transport':'upnp','source_url':url})
-        return {'ok':True,'transport':'upnp','session':session}
-    if kind=='cast':
-        result=cast_driver.play_uri(endpoint,url,title=title,stream_type='LIVE' if source=='radio' else 'BUFFERED')
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'cast-native','transport':'cast','source_url':url})
-        return {'ok':True,'transport':'cast','result':result,'session':session}
-    if kind=='upnp':
-        upnp_play_uri(endpoint,url)
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'upnp-native','transport':'upnp','source_url':url})
-        return {'ok':True,'transport':'upnp','session':session}
-    if kind=='cast':
-        result=cast_driver.play_uri(endpoint,url,title=title,stream_type='LIVE' if source=='radio' else 'BUFFERED')
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'cast-native','transport':'cast','source_url':url})
-        return {'ok':True,'transport':'cast','result':result,'session':session}
-    if kind in ('alsa','meridian') and endpoint.get('address'):
-        result=play_url(endpoint_id,url,device)
-        session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
-                                        {'mode':'endpoint-native','transport':kind})
-        return {'ok':True,'transport':kind,'result':result,'session':session}
-    raise RuntimeError(f'{kind or "unknown"} playback is not wired yet')
+    result=transport.play_url(endpoint,url,title=title,source=source,device=device,volume=volume,
+                              media=_external_media(title,url))
+    session=sessions.start_external(endpoint_id,source,{'title':title,'duration':0.0},
+                                    {'mode':'transport-registry','transport':endpoint.get('kind'),'source_url':url})
+    return {'ok':True,'transport':endpoint.get('kind'),'result':result,'session':session}
 
 
-def _play_compat_programme(endpoint, media, media_ids, token, volume=0.35, position_seconds=0.0):
+def _play_compat_programme(endpoint, media, media_ids, token, volume=None, position_seconds=0.0):
     endpoint_id=endpoint['id']; url=_programme_url(media_ids,token); kind=endpoint.get('kind')
-    total=sum(float(x.get('duration') or 0) for x in media)
     plan={'mode':'compatibility-programme','transport':kind,'render':{'codec':'flac','sample_rate':48000,'bit_depth':16,'channels':2},'tracks':len(media)}
-    if kind=='sonos':
-        sonos_play_uri(endpoint,url)
-        if position_seconds>0: sonos_seek(endpoint,position_seconds)
-        result={'transport':'sonos','volume':sonos_get_volume(endpoint),'url':url}
-    elif kind=='airplay':
-        synthetic={'id':'programme:'+','.join(map(str,media_ids)),'path':url,'codec':'flac','channels':2,'sample_rate':48000,'bit_depth':16,'duration':total,'metadata':{'title':'SurroundCore Queue'}}
-        result=airplay.play(endpoint,url,synthetic,position_seconds,volume)
-    elif kind=='upnp':
-        upnp_play_uri(endpoint,url)
-        if position_seconds>0: upnp_seek(endpoint,position_seconds)
-        result={'transport':'upnp','url':url}
-    elif kind=='cast':
-        result=cast_driver.play_uri(endpoint,url,content_type='audio/flac',title='SurroundCore Queue',stream_type='BUFFERED',position_seconds=position_seconds)
-    else:
-        raise RuntimeError('Compatibility programme transport unsupported')
+    result=transport.play_programme(endpoint,url,title='SurroundCore Queue',position_seconds=position_seconds,volume=volume)
     session=sessions.start_library(endpoint_id,media,position_seconds=position_seconds,plan=plan)
     return {'ok':True,'endpoint':endpoint_id,'plan':plan,'session':session,'result':result}
 
@@ -925,45 +878,38 @@ def playback_url(item: PlaybackURLInput, authorization: str | None = Header(defa
 
 @app.post('/api/v1/playback/{endpoint_id}/stop')
 def playback_stop(endpoint_id: str, authorization: str | None = Header(default=None)):
-    _require_zone(endpoint_id, authorization)
+    _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
     try:
-        return stop_endpoint(endpoint_id)
-    except Exception as exc:
-        raise HTTPException(502, str(exc))
+        result=transport.stop(endpoint); sessions.clear(endpoint_id); return {'ok':True,'result':result}
+    except Exception as exc: raise HTTPException(502,str(exc))
 
 
 @app.get('/api/v1/playback/{endpoint_id}/status')
 def playback_status(endpoint_id: str, authorization: str | None = Header(default=None)):
-    _require_zone(endpoint_id, authorization)
-    endpoint=_playback_endpoint(endpoint_id)
+    _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
     try:
-        if endpoint.get('kind')=='sonos':
-            data=sonos_state(endpoint); sid=_RADIO_ACTIVE.get(endpoint_id)
-            if sid:
-                meta=_radio_meta_get(sid)
-                if meta.get('title'): data['stream_content']=meta['title']
-                data['radio_station_id']=sid
-            return data
-        if endpoint.get('kind')=='upnp': return upnp_state(endpoint)
-        if endpoint.get('kind')=='cast': return cast_driver.state(endpoint)
-        if endpoint.get('kind')=='airplay': return airplay.status(endpoint_id)
-        return endpoint_status(endpoint_id)
-    except Exception as exc:
-        raise HTTPException(502, str(exc))
+        data=transport.status(endpoint) or {}
+        sid=_RADIO_ACTIVE.get(endpoint_id)
+        if sid:
+            meta=_radio_meta_get(sid)
+            if meta.get('title'): data['stream_content']=meta['title']
+            data['radio_station_id']=sid
+        return data
+    except Exception as exc: raise HTTPException(502,str(exc))
 
 
 @app.post('/api/v1/playback/{endpoint_id}/volume')
 def playback_volume(endpoint_id: str, volume: int = Query(ge=0, le=100), authorization: str | None = Header(default=None)):
     _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
-    if endpoint.get('kind') not in ('sonos','upnp','cast'): raise HTTPException(501, 'Volume control is not wired for this transport yet')
-    try: return {'ok':True,'volume':sonos_set_volume(endpoint,volume) if endpoint.get('kind')=='sonos' else (upnp_set_volume(endpoint,volume) if endpoint.get('kind')=='upnp' else cast_driver.set_volume(endpoint,volume))}
+    if 'volume' not in transport.controls(endpoint): raise HTTPException(501,'Volume control is not available for this transport')
+    try: return {'ok':True,'volume':transport.set_volume(endpoint,volume)}
     except Exception as exc: raise HTTPException(502,str(exc))
 
 @app.post('/api/v1/playback/{endpoint_id}/mute')
 def playback_mute(endpoint_id: str, muted: bool = Query(), authorization: str | None = Header(default=None)):
     _require_zone(endpoint_id, authorization); endpoint=_playback_endpoint(endpoint_id)
-    if endpoint.get('kind') not in ('sonos','upnp','cast'): raise HTTPException(501, 'Mute control is not wired for this transport yet')
-    try: return {'ok':True,'muted':sonos_set_mute(endpoint,muted) if endpoint.get('kind')=='sonos' else (upnp_set_mute(endpoint,muted) if endpoint.get('kind')=='upnp' else cast_driver.set_mute(endpoint,muted))}
+    if 'mute' not in transport.controls(endpoint): raise HTTPException(501,'Mute control is not available for this transport')
+    try: return {'ok':True,'muted':transport.set_mute(endpoint,muted)}
     except Exception as exc: raise HTTPException(502,str(exc))
 
 

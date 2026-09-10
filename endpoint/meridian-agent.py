@@ -19,6 +19,9 @@ ADVERTISE = os.getenv('SURROUNDCORE_AGENT_ADVERTISE', '')
 MONO = os.getenv('SURROUNDCORE_MERIDIAN_MONO', 'mono')
 BRIDGE = os.getenv('SURROUNDCORE_MERIDIAN_BRIDGE', 'MeridianDirectStream.exe')
 MANAGED = os.getenv('SURROUNDCORE_MERIDIAN_MANAGED', '')
+CONTROL_BRIDGE = os.getenv('SURROUNDCORE_MERIDIAN_CONTROL_BRIDGE', '/opt/surroundcore-meridian/BridgeTool.exe')
+SOOLOOS_CORE = os.getenv('SURROUNDCORE_MERIDIAN_CORE', '')
+ZONE_ID = os.getenv('SURROUNDCORE_MERIDIAN_ZONE_ID', '')
 DEFAULT_VOLUME = int(os.getenv('SURROUNDCORE_MERIDIAN_VOLUME', '42'))
 
 PLAYER = None
@@ -27,6 +30,27 @@ PREPARED = {}
 PAIRING = None
 LOCK = threading.RLock()
 
+
+def _control_available():
+    return bool(SOOLOOS_CORE and ZONE_ID and os.path.isfile(CONTROL_BRIDGE))
+
+def _control(*args, timeout=20):
+    if not _control_available():
+        return {'available': False, 'reason': 'Meridian control bridge/core/zone not configured'}
+    env=os.environ.copy()
+    if MANAGED:
+        bcl=os.path.join(os.path.dirname(os.path.dirname(MONO)), 'lib', 'mono', '4.5')
+        env['MONO_PATH']=':'.join(x for x in (bcl,MANAGED) if x)
+    cmd=[MONO,CONTROL_BRIDGE]+[str(x) for x in args]
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=timeout,env=env)
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or 'Meridian control failed').strip())
+    return {'available': True, 'output': p.stdout.strip()}
+
+def wake_speakerlink():
+    if not _control_available():
+        return {'available': False}
+    return _control('wake', SOOLOOS_CORE, ZONE_ID, '2')
 
 def _management(command=None):
     with socket.create_connection((ENDPOINT_IP, 9030), timeout=2) as sock:
@@ -104,6 +128,7 @@ def start_player():
         if not PREPARED.get('url'):
             raise RuntimeError('Nothing prepared')
         stop_player(restore=True)
+        wake_speakerlink()
         claim()
         env = os.environ.copy()
         if MANAGED:
@@ -146,6 +171,10 @@ def registration(port=8095):
             'bit_depths': [16, 24],
             'scheduled_group_playback': True,
             'recommended_latency_ms': 2500,
+            'speakerlink_wake_source': 2,
+            'sooloos_core': SOOLOOS_CORE,
+            'sooloos_zone_id': ZONE_ID,
+            'control_bridge': bool(_control_available()),
         },
     }
 
@@ -214,8 +243,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_player())
             if self.path == '/v1/stop':
                 stop_player(restore=True)
+                if _control_available(): _control('transport', SOOLOOS_CORE, ZONE_ID, 'stop')
                 PREPARED = {}
                 return self.send_json({'ok': True})
+            if self.path in ('/v1/pause','/v1/resume'):
+                action='pause' if self.path.endswith('pause') else 'play'
+                return self.send_json({'ok': True, 'control': _control('transport', SOOLOOS_CORE, ZONE_ID, action)})
+            if self.path == '/v1/volume':
+                value=max(0,min(100,int(data.get('volume',DEFAULT_VOLUME))))
+                return self.send_json({'ok': True, 'volume': value, 'control': _control('volume', SOOLOOS_CORE, ZONE_ID, value)})
+            if self.path == '/v1/mute':
+                muted=bool(data.get('muted',True))
+                return self.send_json({'ok': True, 'muted': muted, 'control': _control('mute', SOOLOOS_CORE, ZONE_ID, str(muted).lower())})
+            if self.path == '/v1/wake':
+                return self.send_json({'ok': True, 'control': wake_speakerlink()})
         except Exception as exc:
             return self.send_json({'error': str(exc)}, 500)
         return self.send_json({'error': 'not found'}, 404)

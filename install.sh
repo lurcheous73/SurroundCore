@@ -25,7 +25,7 @@ install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surrou
 if [ ! -d /srv/surroundcore/media ]; then
   install -d -m 0755 /srv/surroundcore/media
 fi
-cp -a core ingest docker-compose.yml .env.example /opt/surroundcore/
+cp -a core ingest storage controlmac-ingest docker-compose.yml .env.example /opt/surroundcore/
 cp endpoint/surround-agent.py /usr/local/lib/surroundcore/
 cp endpoint/surround-agent.service /etc/systemd/system/
 chmod 0755 /usr/local/lib/surroundcore/surround-agent.py
@@ -39,6 +39,10 @@ fi
 if grep -q '^SURROUNDCORE_TOKEN=change-me$' "$ENV"; then
   TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
   sed -i "s/^SURROUNDCORE_TOKEN=.*/SURROUNDCORE_TOKEN=$TOKEN/" "$ENV"
+fi
+if grep -q '^SURROUNDCORE_CONTROLMAC_TOKEN=change-me$' "$ENV"; then
+  CM_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+  sed -i "s/^SURROUNDCORE_CONTROLMAC_TOKEN=.*/SURROUNDCORE_CONTROLMAC_TOKEN=$CM_TOKEN/" "$ENV"
 fi
 
 IP=$(hostname -I | awk '{print $1}')
