@@ -1,0 +1,41 @@
+SurroundCore — Fucking Go For It License (FGFI), Version 1.0
+
+Copyright (c) 2026 Christopher Swain
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, publish, distribute, sublicense, host, fork, build upon,
+and/or sell copies of the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following conditions:
+
+1. The above copyright notice and this permission notice must be included in
+   all substantial copies or distributions of the Software or its source code.
+
+2. Public redistributions, derived projects, products, documentation, About
+   pages, or credits should reasonably acknowledge the original project using
+   wording substantially similar to:
+
+   "SurroundCore — created by Chris Swain, with development assistance from
+   Kev (ChatGPT/OpenAI)."
+
+   Equivalent wording is fine. The point is simple: go for it, but acknowledge
+   where the project came from.
+
+3. The acknowledgement of ChatGPT/OpenAI describes development assistance
+   only. It does not imply sponsorship, certification, affiliation, approval,
+   or endorsement by OpenAI.
+
+4. You may license your modifications or derived works under different terms,
+   provided the notices and acknowledgement required above are preserved for
+   the portions derived from SurroundCore.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS, COPYRIGHT HOLDER, CONTRIBUTORS OR DEVELOPMENT ASSISTANTS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+In less legal English: use it, improve it, fork it, build things with it, sell
+things with it if you want — fucking go for it. Just acknowledge Chris and Kev.
