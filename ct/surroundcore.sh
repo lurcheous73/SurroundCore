@@ -3,9 +3,9 @@ _CS_DEFAULT_URL="https://raw.githubusercontent.com/lurcheous73/SurroundCore/feat
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 
-# Copyright (c) 2026 SurroundCore contributors
-# Author: lurcheous73
-# License: SurroundCore application licence to be finalised; Community Scripts contribution files may be licensed separately.
+# Copyright (c) 2026 Christopher Swain
+# Author: Kev n Chris
+# License: SurroundCore Non-Commercial Licence (SC-NC) 1.0
 # Source: https://github.com/lurcheous73/SurroundCore
 
 APP="SurroundCore"
@@ -17,9 +17,6 @@ var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_arm64="${var_arm64:-no}" # Optical/MakeMKV path is currently validated on amd64 only.
 var_unprivileged="${var_unprivileged:-0}" # Required for optical SCSI/USB media passthrough.
-
-# Permit native optical filesystem access when the host exposes a drive.
-ALLOW_MOUNT_FS="${ALLOW_MOUNT_FS:-udf;iso9660}"
 
 header_info "$APP"
 variables
@@ -36,34 +33,20 @@ function update_script() {
     exit
   fi
 
-  UV_PYTHON="3.13" setup_uv
-  NODE_VERSION="22" setup_nodejs
-  setup_ffmpeg
-
   if check_for_gh_branch "surroundcore" "lurcheous73/SurroundCore" "feature/proxmox-ct-install"; then
     msg_info "Stopping SurroundCore"
-    systemctl stop surroundcore-ingest surroundcore 2>/dev/null || true
+    systemctl stop surroundcore surroundcore-ingest 2>/dev/null || true
     msg_ok "Stopped SurroundCore"
 
-    create_backup /etc/surroundcore/surroundcore.env /var/lib/surroundcore
-
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_branch \
-      "surroundcore" \
-      "lurcheous73/SurroundCore" \
-      "feature/proxmox-ct-install" \
-      "/opt/surroundcore"
-
+    create_backup /opt/surroundcore/.env /var/lib/surroundcore
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_branch "surroundcore" "lurcheous73/SurroundCore" "feature/proxmox-ct-install" "/opt/surroundcore"
     restore_backup
 
     msg_info "Updating Python Dependencies"
-    cd /opt/surroundcore
-    $STD uv venv --python 3.13 .venv
-    $STD uv pip install --python .venv/bin/python \
-      -r core/requirements.txt \
-      -r ingest/requirements.txt
+    /opt/surroundcore/venv/bin/pip install --quiet --upgrade -r /opt/surroundcore/core/requirements.txt -r /opt/surroundcore/ingest/requirements.txt
     msg_ok "Updated Python Dependencies"
 
-    if [[ -f /opt/surroundcore/ingest/netmd/package-lock.json ]]; then
+    if [[ -d /opt/surroundcore/ingest/netmd ]]; then
       msg_info "Updating NetMD Dependencies"
       cd /opt/surroundcore/ingest/netmd
       $STD npm ci --omit=dev
@@ -82,8 +65,7 @@ start
 build_container
 description
 
-msg_ok "Completed successfully!\n"
+msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW}Access it using the following URL:${CL}"
 echo -e "${GATEWAY}${BGN}http://${IP}:8080${CL}"
-echo -e "${INFO}${YW}Optical and removable media are attached by the SurroundCore Proxmox media broker.${CL}"
