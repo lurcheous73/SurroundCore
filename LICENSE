@@ -1,4 +1,4 @@
-SurroundCore No-Commercial-Exploitation Licence (SC-NCE), Version 1.1
+SurroundCore No-Commercial-Exploitation Licence (SC-NCE), Version 1.2
 
 Copyright (c) 2026 Christopher Swain
 
@@ -9,25 +9,39 @@ copy of this software and associated documentation files (the "Software"), to
 use, run, study, copy, modify, fork, and redistribute the Software, including
 modified versions, subject to the conditions below.
 
-1. INTERNAL USE IS ALLOWED
+1. PERMITTED PERSONAL, COMMUNITY, STAFF, AND VENUE USE
 
-The Software may be used internally by individuals, charities, clubs,
-organisations, public bodies, and commercial businesses.
+SurroundCore may be used free of charge by individuals, charities, clubs,
+organisations, public bodies, and businesses where SurroundCore itself is not
+being sold, monetised, licensed, or supplied as a paid customer product or
+service.
 
-A business may, for example, run SurroundCore for music in its office, shop,
-workshop, venue, hotel, staff areas, demonstration rooms, or other premises.
-That kind of incidental internal business use is expressly permitted.
+Permitted business use includes, without limitation:
 
-The fact that an organisation makes money from its ordinary business does not,
-by itself, make its internal use of SurroundCore prohibited.
+- music for staff enjoyment in offices, workshops, staff rooms, warehouses,
+  kitchens, back-of-house areas, and similar workplaces;
+- free background or ambient music in UK pubs, restaurants, cafes, clubs, bars,
+  shops, reception areas, and comparable venues;
+- demonstrations, testing, development, evaluation, and internal training;
+- other incidental use where customers are not paying for SurroundCore or for a
+  product or service substantially based on SurroundCore.
 
-2. DO NOT COMMERCIALLY EXPLOIT SURROUNDCORE
+A business earning money from its ordinary trade does not, by itself, make the
+above permitted uses commercial exploitation of SurroundCore.
 
-Without prior written permission from Christopher Swain, you may not make money
-from SurroundCore itself or from a product, service, or offering substantially
-based on SurroundCore.
+2. CUSTOMER-FACING COMMERCIAL AMENITIES AND EXPLOITATION
 
-Prohibited commercial exploitation includes, without limitation:
+Without prior written permission from Christopher Swain, SurroundCore may not
+be used where SurroundCore, or functionality substantially provided by it, is a
+paid or material customer amenity, product, service, subscription, package, or
+commercial offering.
+
+For clarity, use of SurroundCore to provide in-room or guest-specific music or
+entertainment in a hotel, holiday accommodation, paid hospitality package, or
+similar customer accommodation is treated as commercial use and requires prior
+written permission.
+
+Other prohibited commercial exploitation includes, without limitation:
 
 - selling, renting, licensing, sublicensing, or otherwise supplying the
   Software or a modified version for payment;
@@ -39,16 +53,14 @@ Prohibited commercial exploitation includes, without limitation:
   modification, support, maintenance, or operation as a commercial offering;
 - placing SurroundCore or a derivative behind a paywall or other monetised
   access mechanism;
-- using a modified or renamed version of SurroundCore as the basis of a
-  commercial product or service without permission.
-
-Incidental internal use by a business remains permitted under section 1.
+- using a modified, renamed, rebadged, or white-labelled version of SurroundCore
+  as the basis of a commercial product or service without permission.
 
 3. COPYING, MODIFICATION, AND REDISTRIBUTION
 
 You may copy, modify, fork, and redistribute the Software, including modified
-versions, provided you do not commercially exploit the Software and you comply
-with the attribution requirements below.
+versions, provided you do not commercially exploit the Software contrary to
+this licence and you comply with the attribution requirements below.
 
 Redistributed copies and derived works must preserve these restrictions for all
 portions derived from SurroundCore. You may not relicense those portions in a
@@ -71,9 +83,8 @@ as having been created solely by you or another party.
 5. COMMERCIAL LICENSING
 
 Nothing in this licence prevents the copyright holder from granting separate
-commercial permission or a commercial licence. Anyone wanting to commercially
-exploit SurroundCore must obtain prior written permission from Christopher
-Swain.
+commercial permission or a commercial licence. Anyone wanting a use that falls
+within section 2 must obtain prior written permission from Christopher Swain.
 
 6. CONTRIBUTIONS
 
@@ -87,6 +98,10 @@ Third-party software, libraries, codecs, tools, services, firmware, and other
 components retain their own licences and terms. This licence applies only to
 SurroundCore material for which Christopher Swain holds the relevant rights.
 
+Users are responsible for complying with any music-performance, broadcasting,
+streaming-service, copyright, or other licences required for the music or media
+they choose to play. This licence grants rights to SurroundCore software only.
+
 8. NO WARRANTY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -96,7 +111,8 @@ BY LAW, THE COPYRIGHT HOLDER AND CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY
 CLAIM, DAMAGES, LOSS, OR OTHER LIABILITY ARISING FROM OR IN CONNECTION WITH
 THE SOFTWARE OR ITS USE.
 
-In less legal English: use it at home, at your club, or inside your business.
-Copy it, learn from it, fork it, improve it and share it. Just do not make money
-from SurroundCore or pass Kev n Chris's work off as your own. If you want to
-sell something substantially based on it, ask Chris first.
+In less legal English: use it at home, let your staff enjoy it, or use it free
+for background music in your pub or restaurant. Copy it, learn from it, fork it,
+improve it and share it. Just don't sell SurroundCore, turn it into a paid
+customer feature, or pass Kev n Chris's work off as your own. If you want to do
+that, ask Chris first.
