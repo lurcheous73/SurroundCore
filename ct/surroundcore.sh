@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-_CS_DEFAULT_URL="https://raw.githubusercontent.com/lurcheous73/SurroundCore/feature/proxmox-ct-install"
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/lurcheous73/SurroundCore/proxmox-ct"
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 
 # Copyright (c) 2026 Christopher Swain
 # Author: Kev n Chris
-# License: SurroundCore No-Commercial-Exploitation Licence (SC-NCE) 1.1
+# License: SurroundCore No-Commercial-Exploitation Licence (SC-NCE) 1.2
 # Source: https://github.com/lurcheous73/SurroundCore
 
 APP="SurroundCore"
@@ -33,13 +33,13 @@ function update_script() {
     exit
   fi
 
-  if check_for_gh_branch "surroundcore" "lurcheous73/SurroundCore" "feature/proxmox-ct-install"; then
+  if check_for_gh_branch "surroundcore" "lurcheous73/SurroundCore" "proxmox-ct"; then
     msg_info "Stopping SurroundCore"
     systemctl stop surroundcore surroundcore-ingest 2>/dev/null || true
     msg_ok "Stopped SurroundCore"
 
     create_backup /opt/surroundcore/.env /var/lib/surroundcore
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_branch "surroundcore" "lurcheous73/SurroundCore" "feature/proxmox-ct-install" "/opt/surroundcore"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_branch "surroundcore" "lurcheous73/SurroundCore" "proxmox-ct" "/opt/surroundcore"
     restore_backup
 
     msg_info "Updating Python Dependencies"
