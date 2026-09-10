@@ -31,6 +31,7 @@ from .quality import output_route, source_request, pcm_playback_plan
 from .playback import play_url, stop as stop_endpoint, status as endpoint_status
 from .webui import streaming_setup_html
 from .feature_routes import router as feature_router
+from .controlmac_upload import router as controlmac_upload_router
 from .sources import (SOURCE_KINDS, CACHE_POLICIES, validate_source, source_status,
                       media_path, cache_file, purge_source_cache, cache_stats)
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
@@ -41,6 +42,7 @@ from . import sessions, airplay, userauth, artwork, radio_browser, meridian_disc
 
 app = FastAPI(title='SurroundCore', version='0.5.0-dev')
 app.include_router(feature_router)
+app.include_router(controlmac_upload_router)
 
 _ENDPOINT_CACHE={'at':0.0,'items':[]}
 _ENDPOINT_CACHE_LOCK=threading.Lock()
