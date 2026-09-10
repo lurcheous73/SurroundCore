@@ -20,13 +20,13 @@ Please **remove passwords, API keys, OAuth tokens, bearer tokens, cookies, priva
 
 ## Email support
 
-A dedicated SurroundCore support mailbox will be published here once assigned.
+For direct support enquiries, email [surroundcore@brimstoncottage.uk](mailto:surroundcore@brimstoncottage.uk).
 
-Until then, use GitHub Issues so support requests, fixes and workarounds remain searchable for other users.
+For reproducible bugs, installation problems and feature requests, GitHub Issues are still preferred so fixes and workarounds remain searchable for other users.
 
 ## Security or credential exposure
 
-Do not post exposed credentials or sensitive security information in a public issue. Revoke or rotate any exposed credential first. A private email route will be added here with the dedicated support mailbox.
+Do not post exposed credentials or sensitive security information in a public issue. Revoke or rotate any exposed credential first, then contact [surroundcore@brimstoncottage.uk](mailto:surroundcore@brimstoncottage.uk) if private follow-up is required.
 
 ## Scope
 
