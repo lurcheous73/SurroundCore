@@ -892,8 +892,8 @@ async def library_import(request: Request, artist: str = Query(default='Unknown 
         actual=digest.hexdigest()
         if x_content_sha256 and not hmac.compare_digest(actual,x_content_sha256.lower()):
             raise HTTPException(422,'Uploaded audio checksum mismatch')
-        tmp.replace(dst)
-        item=probe(dst); upsert_media(item)
+        item=probe(tmp); item['path']=str(dst)
+        tmp.replace(dst); upsert_media(item)
         return {'ok':True,'already_present':False,'bytes':size,'sha256':actual,'item':item}
     except Exception:
         tmp.unlink(missing_ok=True)
