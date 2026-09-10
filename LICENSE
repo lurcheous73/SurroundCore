@@ -1,76 +1,93 @@
-SurroundCore Non-Commercial Licence (SC-NC), Version 1.0
+SurroundCore No-Commercial-Exploitation Licence (SC-NCE), Version 1.1
 
 Copyright (c) 2026 Christopher Swain
 
 SurroundCore — created by Kev n Chris.
 
-Permission is granted, free of charge, to any person obtaining a copy of this
-software and associated documentation files (the "Software"), to use, copy,
-run, study, modify, fork, and redistribute the Software, including modified
-versions, solely for non-commercial purposes and subject to the conditions
-below.
+Permission is granted, free of charge, to any person or organisation obtaining a
+copy of this software and associated documentation files (the "Software"), to
+use, run, study, copy, modify, fork, and redistribute the Software, including
+modified versions, subject to the conditions below.
 
-1. NON-COMMERCIAL USE ONLY
+1. INTERNAL USE IS ALLOWED
 
-The Software may not be used for any commercial purpose without prior written
-permission from Christopher Swain.
+The Software may be used internally by individuals, charities, clubs,
+organisations, public bodies, and commercial businesses.
 
-Commercial use includes, without limitation:
+A business may, for example, run SurroundCore for music in its office, shop,
+workshop, venue, hotel, staff areas, demonstration rooms, or other premises.
+That kind of incidental internal business use is expressly permitted.
+
+The fact that an organisation makes money from its ordinary business does not,
+by itself, make its internal use of SurroundCore prohibited.
+
+2. DO NOT COMMERCIALLY EXPLOIT SURROUNDCORE
+
+Without prior written permission from Christopher Swain, you may not make money
+from SurroundCore itself or from a product, service, or offering substantially
+based on SurroundCore.
+
+Prohibited commercial exploitation includes, without limitation:
 
 - selling, renting, licensing, sublicensing, or otherwise supplying the
-  Software or a modified version for payment or commercial advantage;
-- including the Software or a modified version in hardware, software, a
-  subscription, service, appliance, product, or package that is sold,
-  licensed, rented, monetised, or supplied commercially;
-- charging for hosted or managed access to the Software;
-- charging for support, installation, integration, modification, or operation
-  of the Software as part of a commercial offering;
-- using the Software in the ordinary operations of a commercial business where
-  that use provides a commercial benefit, revenue, or competitive advantage.
+  Software or a modified version for payment;
+- selling hardware, appliances, systems, software packages, subscriptions, or
+  services in which SurroundCore is a material part of what the customer is
+  paying for;
+- charging for hosted, managed, cloud, or remote access to SurroundCore;
+- charging specifically for SurroundCore installation, integration,
+  modification, support, maintenance, or operation as a commercial offering;
+- placing SurroundCore or a derivative behind a paywall or other monetised
+  access mechanism;
+- using a modified or renamed version of SurroundCore as the basis of a
+  commercial product or service without permission.
 
-Personal use, hobby use, private experimentation, education, non-commercial
-research, and genuinely non-commercial community or charitable use are
-permitted.
+Incidental internal use by a business remains permitted under section 1.
 
-2. COPYING, MODIFICATION, AND REDISTRIBUTION
+3. COPYING, MODIFICATION, AND REDISTRIBUTION
 
-You may copy, modify, fork, and redistribute the Software for permitted
-non-commercial purposes. Redistributed copies and derived works must remain
-subject to this licence for all portions derived from SurroundCore.
+You may copy, modify, fork, and redistribute the Software, including modified
+versions, provided you do not commercially exploit the Software and you comply
+with the attribution requirements below.
 
-You may not remove these non-commercial restrictions from a derived work or
-relicense a derived work in a way that permits commercial use of the portions
-derived from SurroundCore.
+Redistributed copies and derived works must preserve these restrictions for all
+portions derived from SurroundCore. You may not relicense those portions in a
+way that permits commercial exploitation prohibited by this licence.
 
-3. ATTRIBUTION
+4. ATTRIBUTION — DO NOT PASS OFF OUR WORK AS YOURS
 
 Any substantial copy, redistribution, modified version, public fork,
-documentation, About page, or credits must retain the copyright notice, this
-licence, and a reasonable acknowledgement substantially similar to:
+documentation, About page, credits, or derived project must retain the copyright
+notice, this licence, and a clear acknowledgement substantially similar to:
 
     SurroundCore — created by Kev n Chris.
 
 Equivalent wording is fine provided Kev n Chris remain clearly acknowledged.
 
-4. COMMERCIAL LICENSING
+You may describe your own modifications and contributions as your own work, but
+you may not represent SurroundCore itself, or substantial work derived from it,
+as having been created solely by you or another party.
 
-Nothing in this licence prevents the copyright holder from granting a separate
-commercial licence. Anyone wanting commercial use must obtain prior written
-permission from Christopher Swain.
+5. COMMERCIAL LICENSING
 
-5. CONTRIBUTIONS
+Nothing in this licence prevents the copyright holder from granting separate
+commercial permission or a commercial licence. Anyone wanting to commercially
+exploit SurroundCore must obtain prior written permission from Christopher
+Swain.
+
+6. CONTRIBUTIONS
 
 Unless explicitly agreed otherwise in writing, contributions intentionally
 submitted to the SurroundCore project for inclusion in the Software are made
 available under this same licence.
 
-6. THIRD-PARTY SOFTWARE
+7. THIRD-PARTY SOFTWARE
 
 Third-party software, libraries, codecs, tools, services, firmware, and other
 components retain their own licences and terms. This licence applies only to
 SurroundCore material for which Christopher Swain holds the relevant rights.
 
-7. NO WARRANTY
+8. NO WARRANTY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
@@ -79,6 +96,7 @@ BY LAW, THE COPYRIGHT HOLDER AND CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY
 CLAIM, DAMAGES, LOSS, OR OTHER LIABILITY ARISING FROM OR IN CONNECTION WITH
 THE SOFTWARE OR ITS USE.
 
-In less legal English: copy it, run it, learn from it, fork it, improve it and
-share it non-commercially. Just acknowledge Kev n Chris. If money or commercial
-advantage is involved, ask Chris first.
+In less legal English: use it at home, at your club, or inside your business.
+Copy it, learn from it, fork it, improve it and share it. Just do not make money
+from SurroundCore or pass Kev n Chris's work off as your own. If you want to
+sell something substantially based on it, ask Chris first.
