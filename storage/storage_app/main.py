@@ -1,9 +1,9 @@
-import json, os, re, shutil, subprocess, tempfile, uuid
+import json, os, re, shutil, subprocess, tempfile, uuid, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app=FastAPI(title='SurroundCore Storage',version='0.1')
+app=FastAPI(title='SurroundCore Storage',version='0.2')
 TOKEN=os.getenv('SURROUNDCORE_TOKEN','')
 DATA=Path(os.getenv('SURROUNDCORE_STORAGE_DATA','/data/storage'))
 SOURCES=Path(os.getenv('SURROUNDCORE_SOURCES','/sources'))
@@ -11,6 +11,11 @@ BACKUPS=Path(os.getenv('SURROUNDCORE_BACKUPS','/backups'))
 RCLONE=DATA/'rclone.conf'
 STATE=DATA/'targets.json'
 for p in (DATA,SOURCES,BACKUPS): p.mkdir(parents=True,exist_ok=True)
+
+RAW_ALLOWED_DEVICES={x.strip() for x in os.getenv('SURROUNDCORE_STORAGE_ALLOWED_DEVICES','').split(',') if x.strip()}
+RAW_ALLOWED_SERIALS={x.strip() for x in os.getenv('SURROUNDCORE_STORAGE_ALLOWED_SERIALS','').split(',') if x.strip()}
+POOL_ROOT=Path(os.getenv('SURROUNDCORE_POOL_ROOT','/pools'))
+POOL_ROOT.mkdir(parents=True,exist_ok=True)
 
 def auth(value):
     supplied=(value or '').removeprefix('Bearer ').strip()
@@ -233,4 +238,168 @@ def rclone_remotes(authorization:str|None=Header(default=None)):
     return {'remotes':names,'advanced':True}
 
 @app.get('/v1/health')
-def health(): return {'ok':True,'service':'SurroundCore Storage','version':'0.1'}
+def health(): return {'ok':True,'service':'SurroundCore Storage','version':'0.2'}
+
+class DiskWipeRequest(BaseModel):
+    device:str
+    confirm:str
+    allow_unhealthy:bool=False
+
+class PoolCreateRequest(BaseModel):
+    name:str
+    devices:list[str]
+    layout:str='mirror'
+    allow_unhealthy:bool=False
+
+class PoolDestroyRequest(BaseModel):
+    confirm:str
+
+def _lsblk_disks():
+    raw=run(['lsblk','-J','-b','-d','-o','NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,ROTA,FSTYPE,MOUNTPOINTS'])
+    return json.loads(raw).get('blockdevices') or []
+
+def _system_block_paths():
+    blocked=set()
+    for target in ('/','/boot','/boot/efi'):
+        p=subprocess.run(['findmnt','-rn','-o','SOURCE',target],capture_output=True,text=True)
+        src=(p.stdout or '').strip()
+        if src.startswith('/dev/'):
+            blocked.add(os.path.realpath(src))
+    return blocked
+
+def _smart(device):
+    p=subprocess.run(['smartctl','-j','-i','-H','-A',device],capture_output=True,text=True)
+    try: data=json.loads(p.stdout or '{}')
+    except Exception: data={}
+    passed=((data.get('smart_status') or {}).get('passed'))
+    attrs={}
+    for a in ((data.get('ata_smart_attributes') or {}).get('table') or []):
+        try: attrs[int(a.get('id'))]=int(((a.get('raw') or {}).get('value')) or 0)
+        except Exception: pass
+    reallocated=attrs.get(5,0); pending=attrs.get(197,0); uncorrectable=attrs.get(198,0)
+    healthy=(passed is not False and reallocated==0 and pending==0 and uncorrectable==0)
+    return {'smart_passed':passed,'reallocated':reallocated,'pending':pending,
+            'uncorrectable':uncorrectable,'healthy_for_new_pool':healthy}
+
+def _allowed_disk(row):
+    path=os.path.realpath(str(row.get('path') or ''))
+    serial=str(row.get('serial') or '').strip()
+    if row.get('type')!='disk' or path in _system_block_paths(): return False
+    if RAW_ALLOWED_SERIALS and serial not in RAW_ALLOWED_SERIALS: return False
+    if RAW_ALLOWED_DEVICES and path not in {os.path.realpath(x) for x in RAW_ALLOWED_DEVICES}: return False
+    return bool(RAW_ALLOWED_SERIALS or RAW_ALLOWED_DEVICES)
+
+def _disk_row(device):
+    wanted=os.path.realpath(device)
+    for row in _lsblk_disks():
+        if os.path.realpath(str(row.get('path') or ''))==wanted:
+            if not _allowed_disk(row): raise HTTPException(403,'device is not provisioned as a SurroundCore data disk')
+            return row
+    raise HTTPException(404,'data disk not found')
+
+def _signatures(device):
+    p=subprocess.run(['wipefs','-n','-J',device],capture_output=True,text=True)
+    try:
+        sigs=(json.loads(p.stdout or '{}').get('signatures') or [])
+        return [{'type':x.get('type'),'label':x.get('label'),'offset':x.get('offset')} for x in sigs]
+    except Exception: return []
+
+def _imported_pool_for(device):
+    p=subprocess.run(['zpool','status','-P'],capture_output=True,text=True)
+    real=os.path.realpath(device)
+    for line in (p.stdout or '').splitlines():
+        if real in line: return True
+    return False
+
+@app.get('/v1/disks')
+def raw_disks(authorization:str|None=Header(default=None)):
+    auth(authorization); items=[]
+    for row in _lsblk_disks():
+        if not _allowed_disk(row): continue
+        item={k:row.get(k) for k in ('path','size','model','serial','tran','rota','fstype','mountpoints')}
+        item['smart']=_smart(item['path'])
+        item['signatures']=_signatures(item['path'])
+        item['in_imported_pool']=_imported_pool_for(item['path'])
+        item['eligible']=not item['in_imported_pool']
+        items.append(item)
+    return {'devices':items,'boot_devices_hidden':True}
+
+def _wipe_data_disk(device,allow_unhealthy=False):
+    row=_disk_row(device); serial=str(row.get('serial') or '').strip(); smart=_smart(device)
+    if not smart['healthy_for_new_pool'] and not allow_unhealthy:
+        raise HTTPException(409,'SMART warnings block destructive use unless unhealthy-disk override is explicit')
+    if _imported_pool_for(device): raise HTTPException(409,'device belongs to an imported ZFS pool')
+    subprocess.run(['zpool','labelclear','-f',device],capture_output=True,text=True)
+    for cmd in (['wipefs','-a','-f',device],['sgdisk','--zap-all',device]):
+        p=subprocess.run(cmd,capture_output=True,text=True)
+        if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'disk wipe failed').strip())
+    subprocess.run(['dd','if=/dev/zero',f'of={device}','bs=1M','count=16','conv=fsync'],capture_output=True,text=True)
+    subprocess.run(['partprobe',device],capture_output=True,text=True)
+    return {'ok':True,'device':device,'serial':serial,'wiped_at':time.time()}
+
+@app.post('/v1/disks/wipe')
+def wipe_disk(item:DiskWipeRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); row=_disk_row(item.device); serial=str(row.get('serial') or '').strip()
+    if item.confirm != f'WIPE {serial}': raise HTTPException(400,f'confirmation must be WIPE {serial}')
+    return _wipe_data_disk(item.device,item.allow_unhealthy)
+
+def _pool_name(value):
+    name=re.sub(r'[^A-Za-z0-9_.:-]+','-',str(value or '').strip()).strip('-')
+    if not name or name.lower() in ('mirror','raidz','spare','log','cache'):
+        raise HTTPException(400,'invalid ZFS pool name')
+    return name[:48]
+
+def _pool_rows():
+    p=subprocess.run(['zpool','list','-Hp','-o','name,size,alloc,free,health'],capture_output=True,text=True)
+    if p.returncode: return []
+    out=[]
+    for line in p.stdout.splitlines():
+        cols=line.split('\t')
+        if len(cols)<5: continue
+        name,size,alloc,free,health=cols[:5]
+        root=str(POOL_ROOT/name); lib=str(Path(root)/'library')
+        out.append({'name':name,'size':int(size),'allocated':int(alloc),'free':int(free),
+                    'health':health,'root':root,'library_path':lib})
+    return out
+
+@app.get('/v1/pools')
+def pools(authorization:str|None=Header(default=None)):
+    auth(authorization); return {'pools':_pool_rows()}
+
+@app.post('/v1/pools')
+def create_pool(item:PoolCreateRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); name=_pool_name(item.name)
+    if item.layout!='mirror' or len(item.devices)!=2:
+        raise HTTPException(400,'first release supports exactly two disks in a ZFS mirror')
+    devices=[]
+    for dev in item.devices:
+        row=_disk_row(dev); smart=_smart(dev)
+        if not smart['healthy_for_new_pool'] and not item.allow_unhealthy:
+            raise HTTPException(409,f'{dev} has SMART warnings; explicit unhealthy-disk override required')
+        if _imported_pool_for(dev): raise HTTPException(409,f'{dev} is already in an imported pool')
+        devices.append(os.path.realpath(dev))
+    if any(x['name']==name for x in _pool_rows()): raise HTTPException(409,'pool already exists')
+    for dev in devices:
+        if _signatures(dev): raise HTTPException(409,f'{dev} still has filesystem/ZFS signatures; wipe it first')
+    root=POOL_ROOT/name
+    cmd=['zpool','create','-f','-o','ashift=12',
+         '-O','compression=zstd','-O','atime=off','-O','xattr=sa',
+         '-O','acltype=posixacl','-O',f'mountpoint={root}',name,'mirror',*devices]
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
+    if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool create failed').strip())
+    for dataset,props in ((f'{name}/library',['-o','recordsize=1M']),
+                          (f'{name}/staging',['-o','recordsize=1M'])):
+        q=subprocess.run(['zfs','create',*props,dataset],capture_output=True,text=True)
+        if q.returncode:
+            subprocess.run(['zpool','destroy','-f',name],capture_output=True,text=True)
+            raise HTTPException(502,(q.stderr or q.stdout or 'dataset create failed').strip())
+    return {'ok':True,'pool':next(x for x in _pool_rows() if x['name']==name)}
+
+@app.delete('/v1/pools/{name}')
+def destroy_pool(name:str,item:PoolDestroyRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); name=_pool_name(name)
+    if item.confirm != f'DESTROY {name}': raise HTTPException(400,f'confirmation must be DESTROY {name}')
+    if not any(x['name']==name for x in _pool_rows()): raise HTTPException(404,'pool not found')
+    p=subprocess.run(['zpool','destroy','-f',name],capture_output=True,text=True,timeout=60)
+    if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool destroy failed').strip())
+    return {'ok':True,'name':name}

@@ -68,12 +68,16 @@ services:
       SURROUNDCORE_STORAGE_DATA: /var/lib/surroundcore/storage
       SURROUNDCORE_SOURCES: /sources
       SURROUNDCORE_BACKUPS: /backup
+      SURROUNDCORE_STORAGE_ALLOWED_DEVICES: ${SURROUNDCORE_STORAGE_ALLOWED_DEVICES:-}
+      SURROUNDCORE_STORAGE_ALLOWED_SERIALS: ${SURROUNDCORE_STORAGE_ALLOWED_SERIALS:-}
+      SURROUNDCORE_POOL_ROOT: /pools
     volumes:
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:rshared
       - ${SURROUNDCORE_BACKUP:-/srv/surroundcore/backup}:/backup:rshared
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}/storage:/var/lib/surroundcore/storage
+      - ${SURROUNDCORE_POOL_HOST_ROOT:-/srv/surroundcore/pools}:/pools:rshared
   surround-meridian:
     build: ./meridian
     container_name: surround-meridian
