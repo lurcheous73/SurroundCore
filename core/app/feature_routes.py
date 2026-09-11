@@ -118,6 +118,14 @@ def playlist_save(item:PlaylistInput,authorization:str|None=Header(default=None)
 def metadata_providers(authorization:str|None=Header(default=None)):
     _user(authorization); return {'providers':metadata_connectors.catalog()}
 
+@router.get('/metadata/candidates')
+def metadata_candidates(artist:str,album:str,tracks:str='',limit:int=12,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    titles=[x.strip() for x in tracks.split('\n') if x.strip()]
+    try: return metadata_connectors.candidate_search(artist,album,titles,limit)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    except Exception as exc: raise HTTPException(502,f'Metadata lookup failed: {exc}')
+
 @router.get('/metadata/{provider_id}/search')
 def metadata_search(provider_id:str,q:str='',artist:str|None=None,album:str|None=None,track:str|None=None,limit:int=20,authorization:str|None=Header(default=None)):
     _user(authorization)

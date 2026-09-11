@@ -67,3 +67,52 @@ def search(provider_id,query='',artist=None,album=None,track=None,limit=20):
     if pid=='discogs': return search_discogs(query or ' '.join(x for x in (artist,album,track) if x),limit=limit)
     if pid=='lastfm': return search_lastfm(query or album or artist or track,limit=limit)
     return handoff(pid)
+
+
+def _plain(value):
+    import re
+    return re.sub(r'[^a-z0-9]+',' ',str(value or '').casefold()).strip()
+
+def _mb_artist(item):
+    parts=[]
+    for x in item.get('artist-credit') or []:
+        if isinstance(x,dict): parts.append(str(x.get('name') or (x.get('artist') or {}).get('name') or ''))
+    return ''.join(parts).strip()
+
+def _mb_release_detail(release_id):
+    return _get('https://musicbrainz.org/ws/2/release/'+urllib.parse.quote(str(release_id),safe=''),
+        {'inc':'recordings+artist-credits','fmt':'json'},timeout=20)
+
+
+def candidate_search(artist,album,tracks=None,limit=12):
+    base=search_musicbrainz(artist,album,None,max(limit,8)).get('items') or []
+    wanted=[_plain(x) for x in (tracks or []) if _plain(x)]
+    items=[]
+    for raw in base[:max(1,min(int(limit),20))]:
+        rid=raw.get('id'); detail=raw
+        if wanted and rid:
+            try: detail=_mb_release_detail(rid)
+            except Exception: detail=raw
+        media=detail.get('media') or raw.get('media') or []
+        track_rows=[]; formats=[]
+        for med in media:
+            if med.get('format'): formats.append(str(med.get('format')))
+            for tr in med.get('tracks') or []:
+                rec=tr.get('recording') or {}; title=rec.get('title') or tr.get('title')
+                if title: track_rows.append(str(title))
+
+        exact=0
+        if wanted and track_rows:
+            local=set(wanted); remote=[_plain(x) for x in track_rows]
+            exact=sum(1 for x in remote if x in local)
+        date=str(detail.get('date') or raw.get('date') or '')
+        country=str(detail.get('country') or raw.get('country') or '')
+        score=exact*100 - abs(len(track_rows)-len(wanted))*5 if wanted else 0
+        items.append({'provider':'musicbrainz','id':rid,'artist':_mb_artist(detail) or _mb_artist(raw) or artist,
+            'title':detail.get('title') or raw.get('title') or album,'year':date[:4] if date else '',
+            'country':country,'format':'/'.join(sorted(set(formats))),'disc_count':len(media),
+            'track_count':len(track_rows) or sum(int(x.get('track-count') or 0) for x in media),
+            'tracks':track_rows,'exact_track_matches':exact,'score':score,
+            'artwork_url':('https://coverartarchive.org/release/'+str(rid)+'/front-500') if rid else None})
+    items.sort(key=lambda x:(x.get('score',0),x.get('exact_track_matches',0),x.get('year','')),reverse=True)
+    return {'provider':'combined','items':items}

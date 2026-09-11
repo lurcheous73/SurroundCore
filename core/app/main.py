@@ -277,6 +277,17 @@ class CatalogSplitInput(BaseModel):
 class CatalogArtworkInput(BaseModel):
     data_base64: str
 
+class CatalogMetadataApplyInput(BaseModel):
+    provider: str='musicbrainz'
+    release_id: Optional[str]=None
+    artist: str
+    title: str
+    year: Optional[str]=None
+    country: Optional[str]=None
+    release_format: Optional[str]=None
+    artwork_url: Optional[str]=None
+    tracks: list[str]=Field(default_factory=list)
+
 @app.on_event('startup')
 def startup():
     init_db()
@@ -1662,6 +1673,46 @@ def admin_catalog_artwork(album_id: str, body: CatalogArtworkInput, authorizatio
         except OSError: pass
     catalog.update_album(album_id,metadata={'artwork_override':dst})
     return {'ok':True,'album_id':album_id}
+
+def _save_remote_artwork(album_id,url):
+    parsed=urllib.parse.urlparse(str(url or ''))
+    allowed={'coverartarchive.org','www.coverartarchive.org'}
+    if parsed.scheme!='https' or parsed.hostname not in allowed: return False
+    try:
+        with httpx.Client(timeout=20,follow_redirects=True) as client:
+            r=client.get(url,headers={'User-Agent':'SurroundCore/0.5'}); r.raise_for_status(); raw=r.content
+    except Exception: return False
+    if not raw or len(raw)>15*1024*1024: return False
+    root=os.path.join(os.getenv('SURROUNDCORE_DATA','/data'),'artwork-overrides'); os.makedirs(root,exist_ok=True)
+    src=os.path.join(root,album_id+'.lookup'); dst=os.path.join(root,album_id+'.jpg')
+    with open(src,'wb') as f:f.write(raw)
+    try:
+        proc=subprocess.run(['ffmpeg','-y','-v','error','-i',src,'-frames:v','1','-q:v','2',dst],capture_output=True,timeout=15)
+        return proc.returncode==0 and os.path.isfile(dst)
+    finally:
+        try:os.unlink(src)
+        except OSError:pass
+
+@app.post('/api/v1/admin/catalog/albums/{album_id}/apply-metadata')
+def admin_catalog_apply_metadata(album_id:str, body:CatalogMetadataApplyInput, authorization:str|None=Header(default=None)):
+    _require_admin(authorization)
+    album=catalog.album_info(album_id)
+    if not album: raise HTTPException(404,'Album not found')
+    meta={'metadata_provider':body.provider,'release_id':body.release_id,'release_year':body.year,
+          'release_country':body.country,'release_format':body.release_format}
+    item=catalog.update_album(album_id,body.artist,body.title,{k:v for k,v in meta.items() if v})
+    editions=[]
+    with catalog.connect() as con:
+        editions=[dict(x) for x in con.execute('SELECT id FROM editions WHERE album_id=? ORDER BY created_at,id',(album_id,))]
+    if editions and body.year:
+        catalog.update_edition(editions[0]['id'],release_year=body.year,metadata={k:v for k,v in meta.items() if v})
+    media_ids=catalog.album_media_ids(album_id)
+    if body.tracks and len(body.tracks)==len(media_ids):
+        for idx,(mid,title) in enumerate(zip(media_ids,body.tracks),1): catalog.update_media_tags(mid,{'title':title,'track':str(idx)})
+    art=False
+    if body.artwork_url: art=_save_remote_artwork(album_id,body.artwork_url)
+    if art: catalog.update_album(album_id,metadata={'artwork_override':os.path.join(os.getenv('SURROUNDCORE_DATA','/data'),'artwork-overrides',album_id+'.jpg')})
+    return {'ok':True,'album':item,'tracks_updated':bool(body.tracks and len(body.tracks)==len(media_ids)),'artwork_updated':art}
 
 @app.get('/api/v1/admin/media')
 def admin_media(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
