@@ -78,6 +78,18 @@ services:
       - ${SURROUNDCORE_BACKUP:-/srv/surroundcore/backup}:/backup:rshared
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}/storage:/var/lib/surroundcore/storage
       - ${SURROUNDCORE_POOL_HOST_ROOT:-/srv/surroundcore/pools}:/pools:rshared
+
+  surround-storage-share:
+    build: ./storage-share
+    container_name: surround-storage-share
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      SURROUNDCORE_STORAGE_POOL: ${SURROUNDCORE_STORAGE_POOL:-SurroundStore}
+      SURROUNDCORE_STORAGE_CLIENTS: ${SURROUNDCORE_STORAGE_CLIENTS:-10.26.30.0/24}
+    volumes:
+      - ${SURROUNDCORE_POOL_HOST_ROOT:-/srv/surroundcore/pools}:/pools:rshared
   surround-meridian:
     build: ./meridian
     container_name: surround-meridian

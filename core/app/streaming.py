@@ -153,6 +153,10 @@ DEFAULT_SETTINGS = {
     'providers': {},
     'radio_stations': [],
     'podcast_feeds': [],
+    'primary_library_source': None,
+    'primary_library_node': None,
+    'primary_library_pool': None,
+    'library_placement_rules': [],
 }
 
 

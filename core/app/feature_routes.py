@@ -188,6 +188,36 @@ def core_node_storage_pool_destroy(node_id:str,name:str,payload:dict,authorizati
     _admin(authorization)
     return _node('DELETE',f'/v1/nodes/{node_id}/storage/pools/{name}',payload)
 
+
+@router.post('/core-systems/nodes/{node_id}/storage/use-primary-library')
+def core_node_use_primary_library(node_id:str,payload:dict|None=None,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    systems=_node('GET','/v1/system')
+    node=next((n for n in systems.get('nodes',[]) if str(n.get('id'))==str(node_id)),None)
+    if not node or node.get('role')!='extended-storage': raise HTTPException(404,'Extended Storage node not found')
+    if not node.get('online'): raise HTTPException(409,'Extended Storage node is offline')
+    pools=_node('GET',f'/v1/nodes/{node_id}/storage/pools').get('pools') or []
+    online=[x for x in pools if x.get('online')]
+    if not online: raise HTTPException(409,'No online managed storage pool on this node')
+    chosen=next((x for x in online if x.get('name')==str((payload or {}).get('pool') or '')),online[0])
+    callback=str(node.get('callback_url') or '')
+    host=urllib.parse.urlsplit(callback).hostname
+    if not host: raise HTTPException(409,'Storage node has no reachable address')
+    mount_payload={'kind':'nfs','host':host,'share':'/library','name':node.get('name') or chosen.get('name') or 'Extended Storage','use':'library','writable':True}
+    mounted=_storage('POST','/v1/network/connect',mount_payload)
+    mounted=_register_library_target(mounted,mount_payload)
+    from .db import save_source,list_sources
+    primary_id=mounted.get('library_source_id')
+    for src in list_sources():
+        cfg=dict(src.get('config') or {})
+        cfg['primary_library']=str(src.get('id'))==str(primary_id)
+        if cfg['primary_library']:
+            cfg.update({'managed_node_id':node_id,'managed_pool':chosen.get('name'),'managed_role':'extended-storage'})
+        save_source({**src,'config':cfg})
+    from .streaming import save_settings
+    save_settings({'primary_library_source':primary_id,'primary_library_node':node_id,'primary_library_pool':chosen.get('name')})
+    return {'ok':True,'node':node,'pool':chosen,'target':mounted,'primary_library_source':primary_id}
+
 @router.get('/catalog/albums')
 def albums(authorization:str|None=Header(default=None)):
     _user(authorization); return {'albums':catalog.album_catalog()}

@@ -49,7 +49,7 @@ CLOUDS={
 
 class NetworkRequest(BaseModel):
  kind:str; host:str; share:str|None=None; username:str|None=None; password:str|None=None
- domain:str|None=None; name:str|None=None; use:str='library'
+ domain:str|None=None; name:str|None=None; use:str='library'; writable:bool=False
 class UsbRequest(BaseModel):
  device:str; name:str|None=None; use:str='library'
 class CloudRequest(BaseModel):
@@ -164,7 +164,7 @@ def network_connect(item:NetworkRequest,authorization:str|None=Header(default=No
             os.chmod(cf,0o600); opts=f'credentials={cf},iocharset=utf8,vers=3.0'
         else: opts='guest,iocharset=utf8,vers=3.0'
     else:
-        source=f'{item.host}:{item.share}'; opts='ro,nosuid,nodev'
+        source=f'{item.host}:{item.share}'; opts=('rw' if item.writable else 'ro')+',nosuid,nodev,vers=4'
     try: sample=temp_mount(source,item.kind,opts)
     except Exception as exc: raise HTTPException(502,f'Connection test failed: {exc}')
     try: permanent_mount(source,path,item.kind,opts)
