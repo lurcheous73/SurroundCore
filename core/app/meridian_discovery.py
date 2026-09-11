@@ -1,5 +1,6 @@
 import concurrent.futures
 import ipaddress
+import logging
 import os
 import socket
 import threading
@@ -9,6 +10,7 @@ PORT = 9030
 CACHE_SECONDS = 60
 _CACHE = {'at': 0.0, 'items': []}
 _LOCK = threading.Lock()
+LOG = logging.getLogger("surroundcore.meridian.discovery")
 
 MODELS = [
     'Meridian / Sooloos', 'MC200', 'MC600', 'MS200', 'MS600',
@@ -41,6 +43,7 @@ def _parse_banner(text):
 def _probe(ip):
     try:
         with socket.create_connection((str(ip), PORT), timeout=0.18) as sock:
+            LOG.info("SOOLOOS probe connected ip=%s port=%s", ip, PORT)
             sock.settimeout(0.45)
             chunks = []
             end = time.time() + 0.7
@@ -82,7 +85,8 @@ def endpoints(force=False):
     with _LOCK:
         if not force and time.time() - _CACHE['at'] < CACHE_SECONDS:
             return [dict(x) for x in _CACHE['items']]
-    hosts = list(_network().hosts())
+    network=_network(); hosts = list(network.hosts())
+    LOG.info("SOOLOOS discovery start force=%s network=%s hosts=%s", force, network, len(hosts))
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, len(hosts) or 1)) as pool:
         items = [x for x in pool.map(_probe, hosts) if x]
     with _LOCK:

@@ -3,6 +3,7 @@ import base64
 import subprocess
 import concurrent.futures
 import json
+import logging
 import os
 import threading
 import time
@@ -52,6 +53,7 @@ _ENDPOINT_CACHE_SECONDS=10.0
 _RADIO_META={}
 _RADIO_META_LOCK=threading.Lock()
 _RADIO_ACTIVE={}
+SOOLOOS_LOG = logging.getLogger("surroundcore.sooloos")
 
 
 class EndpointRegistration(BaseModel):
@@ -666,11 +668,14 @@ def _attach_meridian_zone_ids(items):
             endpoint['capabilities']=caps
 
 def _all_endpoints(force=False):
+    if force: SOOLOOS_LOG.info("endpoint refresh requested force=true; Sooloos discovery permitted")
     with _ENDPOINT_CACHE_LOCK:
         if not force and time.time()-_ENDPOINT_CACHE['at'] < _ENDPOINT_CACHE_SECONDS:
             return [dict(x) for x in _ENDPOINT_CACHE['items']]
     combined={e['id']:e for e in list_endpoints()}
-    jobs=[('meridian',lambda:meridian_discovery.endpoints(force=force)),('sonos',sonos_endpoints),('mdns',mdns_endpoints),('upnp',upnp_endpoints)]
+    jobs=[('sonos',sonos_endpoints),('mdns',mdns_endpoints),('upnp',upnp_endpoints)]
+    if force:
+        jobs.insert(0,('meridian',lambda:meridian_discovery.endpoints(force=True)))
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=4)
     futures={pool.submit(fn):name for name,fn in jobs}
     done,_=concurrent.futures.wait(futures,timeout=5.5)
@@ -1520,6 +1525,7 @@ def output_transport(item: OutputTransportInput, authorization: str | None = Hea
 
 @app.post('/api/v1/endpoints/discover')
 def endpoints_discover(authorization: str | None = Header(default=None)):
+    SOOLOOS_LOG.info("explicit administrator endpoint discovery invoked")
     user, _token = _auth_context(authorization)
     if user.get('role') != 'admin':
         raise HTTPException(403, 'Administrator access required')
@@ -2021,6 +2027,8 @@ def _session_endpoint(endpoint_id):
 
 @app.post('/api/v1/sessions/{endpoint_id}/{control}')
 def playback_session_control(endpoint_id: str, control: str, position_seconds: float | None = Query(default=None), authorization: str | None = Header(default=None)):
+    if str(endpoint_id).startswith("meridian:"):
+        SOOLOOS_LOG.info("Meridian session control endpoint=%s control=%s position=%s", endpoint_id, control, position_seconds)
     _user, token = _require_zone(endpoint_id, authorization); endpoint = _session_endpoint(endpoint_id)
     if not sessions.view(endpoint_id): raise HTTPException(404, 'Playback session not found')
     kind=endpoint.get('kind'); is_airplay=kind=='airplay'; is_sonos=kind=='sonos'; is_upnp=kind=='upnp'; is_cast=kind=='cast'
@@ -2067,6 +2075,8 @@ def playback_session_control(endpoint_id: str, control: str, position_seconds: f
 
 @app.post('/api/v1/endpoints/{endpoint_id}/stop')
 def endpoint_stop(endpoint_id: str, authorization: str | None = Header(default=None)):
+    if str(endpoint_id).startswith("meridian:"):
+        SOOLOOS_LOG.info("Meridian endpoint stop endpoint=%s", endpoint_id)
     _user, token = _require_zone(endpoint_id, authorization)
     endpoint = next((e for e in _all_endpoints() if e['id'] == endpoint_id), None)
     if not endpoint or endpoint.get('kind') not in ('alsa', 'airplay', 'sonos', 'upnp', 'cast', 'meridian') or not endpoint.get('address'):

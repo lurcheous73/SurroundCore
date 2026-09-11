@@ -39,6 +39,40 @@ CREATE TABLE IF NOT EXISTS endpoints (
   capabilities_json TEXT NOT NULL DEFAULT '{}',
   last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS sooloos_sync_state (
+  source_id TEXT PRIMARY KEY,
+  last_sync_at REAL,
+  album_count INTEGER NOT NULL DEFAULT 0,
+  track_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'never',
+  error TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS sooloos_albums (
+  source_id TEXT NOT NULL,
+  album_id TEXT NOT NULL,
+  artist TEXT,
+  title TEXT,
+  release_date TEXT,
+  cover_ref TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY(source_id, album_id)
+);
+CREATE TABLE IF NOT EXISTS sooloos_tracks (
+  source_id TEXT NOT NULL,
+  track_id TEXT NOT NULL,
+  album_id TEXT,
+  track_number INTEGER,
+  title TEXT,
+  artist TEXT,
+  duration REAL,
+  media_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY(source_id, track_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sooloos_tracks_album
+  ON sooloos_tracks(source_id, album_id, track_number);
 CREATE TABLE IF NOT EXISTS playback_groups (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -221,3 +255,31 @@ def delete_source(source_id):
     with connect() as con:
         con.execute('DELETE FROM media WHERE source_id=?',(source_id,))
         return con.execute('DELETE FROM library_sources WHERE id=?',(source_id,)).rowcount>0
+
+
+def replace_sooloos_snapshot(source_id, albums, tracks, metadata=None):
+    import time
+    sid=str(source_id)
+    with connect() as con:
+        con.execute('DELETE FROM sooloos_tracks WHERE source_id=?',(sid,))
+        con.execute('DELETE FROM sooloos_albums WHERE source_id=?',(sid,))
+        con.executemany('INSERT INTO sooloos_albums(source_id,album_id,artist,title,release_date,cover_ref,metadata_json) VALUES(?,?,?,?,?,?,?)',
+            [(sid,str(a.get('album_id') or a.get('id')),a.get('artist'),a.get('title'),a.get('release_date'),a.get('cover_ref'),json.dumps(a.get('metadata') or {})) for a in albums])
+        con.executemany('INSERT INTO sooloos_tracks(source_id,track_id,album_id,track_number,title,artist,duration,media_id,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)',
+            [(sid,str(t.get('track_id') or t.get('id')),str(t.get('album_id') or ''),t.get('track_number'),t.get('title'),t.get('artist'),t.get('duration'),t.get('media_id'),json.dumps(t.get('metadata') or {})) for t in tracks])
+        con.execute('INSERT INTO sooloos_sync_state(source_id,last_sync_at,album_count,track_count,status,error,metadata_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET last_sync_at=excluded.last_sync_at,album_count=excluded.album_count,track_count=excluded.track_count,status=excluded.status,error=excluded.error,metadata_json=excluded.metadata_json',
+            (sid,time.time(),len(albums),len(tracks),'ok',None,json.dumps(metadata or {})))
+    return {'source_id':sid,'album_count':len(albums),'track_count':len(tracks)}
+
+def sooloos_snapshot(source_id):
+    sid=str(source_id)
+    with connect() as con:
+        state=con.execute('SELECT * FROM sooloos_sync_state WHERE source_id=?',(sid,)).fetchone()
+        albums=[dict(r) for r in con.execute('SELECT * FROM sooloos_albums WHERE source_id=? ORDER BY artist COLLATE NOCASE,title COLLATE NOCASE',(sid,))]
+        tracks=[dict(r) for r in con.execute('SELECT * FROM sooloos_tracks WHERE source_id=? ORDER BY album_id,track_number,track_id',(sid,))]
+    for row in albums: row['metadata']=json.loads(row.pop('metadata_json') or '{}')
+    for row in tracks: row['metadata']=json.loads(row.pop('metadata_json') or '{}')
+    out={'source_id':sid,'albums':albums,'tracks':tracks}
+    if state:
+        st=dict(state); st['metadata']=json.loads(st.pop('metadata_json') or '{}'); out['state']=st
+    return out
