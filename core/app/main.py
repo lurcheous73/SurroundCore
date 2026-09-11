@@ -398,7 +398,13 @@ def _logical_zones(user):
         if endpoint.get('kind')=='alsa' and (endpoint.get('capabilities') or {}).get('devices'):
             for i,dev in enumerate(endpoint['capabilities']['devices']):
                 device=dev.get('raw_alsa') or dev.get('alsa') or f'device-{i}'
-                zones.append({'id':f"{endpoint['id']}::{device}",'endpoint_id':endpoint['id'],'device':device,'name':_local_zone_name(dev,i),'address':'local','kind':'alsa','transports':['alsa'],'playable':bool(endpoint.get('address')),'local':True,'endpoints':[endpoint]})
+                zone_id=f"{endpoint['id']}::{device}"
+                profile=output_profiles.get_profile(zone_id)
+                name=profile.get('name') or _local_zone_name(dev,i)
+                zones.append({'id':zone_id,'endpoint_id':endpoint['id'],'device':device,'name':name,
+                    'address':'local','kind':'alsa','transports':['alsa'],'transport_options':[protocols.describe('alsa')],
+                    'transport_preference':'alsa','transport_key':zone_id,'playable':bool(endpoint.get('address')),
+                    'local':True,'physical_device':dict(dev),'endpoints':[endpoint]})
             continue
         host=_endpoint_host(endpoint); name=str(endpoint.get('name') or endpoint.get('id') or 'Zone'); base=name.removesuffix(' (L)').removesuffix(' (R)')
         key=host or base.casefold(); groups.setdefault(key,{'name':base,'host':host,'key':key,'endpoints':[]})['endpoints'].append(endpoint)
