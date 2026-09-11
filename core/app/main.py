@@ -41,7 +41,7 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
                  save_group, list_groups, get_group, delete_group, update_group_latency,
                  save_source, list_sources, get_source, delete_source, prune_source_media, delete_media)
 from .groups import GroupPlayback
-from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols, catalog, output_profiles, transport
+from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols, catalog, output_profiles, transport, replication
 
 app = FastAPI(title='SurroundCore', version='0.001')
 app.include_router(feature_router)
@@ -314,6 +314,33 @@ def shutdown():
 @app.get('/api/v1/health')
 def health():
     return {'ok': True, 'service': 'SurroundCore', 'version': '0.001'}
+
+
+def _require_node_token(authorization=None):
+    supplied = authorization[7:] if authorization and authorization.startswith('Bearer ') else ''
+    expected = os.getenv('SURROUNDCORE_NODE_TOKEN', '')
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(401, 'SurroundCore node credential required')
+    return supplied
+
+
+@app.get('/api/v1/internal/replication/export')
+def replication_export(authorization: str | None = Header(default=None)):
+    _require_node_token(authorization)
+    payload = replication.build_bundle()
+    return Response(content=payload, media_type='application/gzip',
+                    headers={'Content-Disposition':'attachment; filename=surroundcore-recovery.tar.gz'})
+
+
+@app.put('/api/v1/internal/replication/apply')
+async def replication_apply(request: Request, authorization: str | None = Header(default=None)):
+    _require_node_token(authorization)
+    try:
+        result = replication.apply_bundle(await request.body())
+        userauth.init_auth_db()
+        return result
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.get('/', response_class=HTMLResponse)
