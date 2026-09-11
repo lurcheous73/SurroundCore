@@ -4,23 +4,39 @@ SurroundCore is always managed through the Primary Core interface/API. Users do 
 
 ## Roles
 
-**Primary Core** owns the canonical catalogue, users, queues, metadata/provider settings, presentation/formatting, storage policy, playback orchestration and update policy.
+**Primary Core** owns the canonical catalogue, users, metadata/provider settings, presentation/formatting, storage policy, playback policy, node membership and update policy.
 
-**Extended Storage** is a lightweight managed node that contributes capacity to a Primary Core. Its internal file transport may be NFS, but that is implementation plumbing only. The user sees it as an Extended Storage node in SurroundCore Control.
+**Replica Core** continuously receives a recoverable copy of Primary state and can keep normal playback/control running when the Primary is offline. A Replica never promotes itself and never becomes Primary automatically.
+
+**Extended Storage** is a lightweight managed node that contributes capacity to the Primary. Its internal transport may be NFS, but that is implementation plumbing only. The user sees one managed storage node in SurroundCore Control.
 
 **Render / OAAT node** provides playback/render capability. It reports codecs, PCM formats, channel layouts, latency, hardware and health to the Primary. It does not own the canonical catalogue.
 
-**OAAT endpoint** is an audio endpoint using Open Advanced Audio Transport. OAAT is independent of discovery and any future secure remote carrier.
+**OAAT endpoint** uses Open Advanced Audio Transport. OAAT is independent of discovery and any future secure remote carrier.
+
+## Primary failure and recovery
+
+If the Primary goes offline, Replica Cores continue serving from their latest replicated state. There is no promotion, election or split-brain mode.
+
+Normal playback, queue control, reachable storage and cached media continue. If media lives only on storage physically attached to the failed Primary, the Replica reports that Primary-hosted storage as unavailable while keeping other reachable/cached media usable.
+A replacement Primary is installed as a Primary and chooses **Recover existing system from Replica**. It authenticates to a selected Replica, restores the replicated system identity/state, then resumes authority. The Replica remains a Replica throughout.
+
+Replicas may journal transient outage activity such as queue position/history, but structural configuration remains Primary-owned so an old/rebuilt Primary cannot create conflicting authority.
+
+## Replica media cache
+
+If a Replica has no dedicated music store, SurroundCore defaults its media cache to a soft maximum of **33% of the usable data volume**. This is a quota, not a fixed partition.
+
+The Primary UI may change that percentage, pin selected media, and inspect cache health. Non-pinned cache uses LRU eviction. Cached original media remains bit-identical to the source.
+
 ## Data and playback path
 
-Original media bytes live on storage selected through the Primary interface. The Primary may read them from its own disks or from Extended Storage over an internal read-only transport such as NFS.
+Original media bytes live on storage selected through the Primary interface. The Primary/Replica may read them from Primary disks or Extended Storage over an internal read-only transport such as NFS.
 
-Playback remains Core-controlled. If the destination supports the original encoded stream, SurroundCore may pass it unchanged. If PCM is required, decoding must preserve the source sample rate, bit depth and channel layout unless the user explicitly allows conversion. OAAT carries native/PCM audio to capable render nodes with timing and capability negotiation.
+Playback remains Core-controlled. If the destination supports the original encoded stream, SurroundCore may pass it unchanged. If PCM is required, decoding preserves source sample rate, bit depth and channel layout unless the user explicitly allows conversion. OAAT carries native/PCM audio with timing and capability negotiation.
 
 ## Updates
 
-Updates are explicit and Primary-controlled. The Nodes & Updates surface must allow selection of the Primary, individual Extended Storage/render nodes, any owned OAAT endpoint, or all compatible nodes.
+Updates are explicit and Primary-controlled. The Nodes & Updates surface allows selection of the Primary, individual Replica/Extended Storage/render nodes, owned OAAT endpoints, or all compatible nodes.
 
-Each node reports role, identity, current build, health and last update result. The Primary owns the desired build and formatting/policy. Nodes do not independently change UI or policy.
-
-No automatic cron updates. Where platform support exists, create a snapshot/rollback point before applying an update and verify health after restart.
+Each node reports role, identity, current build, health and last update result. Nodes do not independently change UI, formatting or policy. No automatic cron updates; create rollback state where supported and verify health after restart.
