@@ -8,6 +8,7 @@ router=APIRouter(prefix='/api/v1')
 STORAGE_URL=os.getenv('SURROUNDCORE_STORAGE_URL','http://127.0.0.1:8084').rstrip('/')
 MERIDIAN_URL=os.getenv('SURROUNDCORE_MERIDIAN_URL','http://127.0.0.1:8091').rstrip('/')
 HARDWARE_URL=os.getenv('SURROUNDCORE_HARDWARE_URL','').rstrip('/')
+NODE_URL=os.getenv('SURROUNDCORE_NODE_URL','http://127.0.0.1:8094').rstrip('/')
 
 
 def _supplied(authorization):
@@ -53,6 +54,22 @@ def _hardware(path='/v1/hardware'):
     if r.status_code>=400: raise HTTPException(r.status_code,data.get('detail') or r.text)
     return data
 
+
+def _node(method,path,payload=None):
+    token=os.getenv('SURROUNDCORE_NODE_TOKEN','')
+    if not token: raise HTTPException(503,'Core Systems service is not configured')
+    try:
+        with httpx.Client(timeout=35) as client:
+            r=client.request(method,NODE_URL+path,json=payload,
+                             headers={'Authorization':'Bearer '+token})
+    except Exception as exc:
+        raise HTTPException(502,f'Core Systems service unavailable: {exc}')
+    try: data=r.json()
+    except Exception: data={'detail':r.text}
+    if r.status_code>=400:
+        raise HTTPException(r.status_code,data.get('detail') or data.get('error') or r.text)
+    return data
+
 def _register_library_target(item,payload):
     if str((payload or {}).get('use') or 'library')!='library' or not item.get('path'):
         return item
@@ -96,10 +113,45 @@ class MetadataProviderInput(BaseModel):
     secret:str|None=None
     clear_secret:bool=False
 
+class CoreRoleInput(BaseModel):
+    role:str
+    storage_mode:str='local'
+
+class CoreJoinInput(BaseModel):
+    primary_url:str
+    code:str
+    name:str|None=None
+    callback_url:str|None=None
+
 class MediaExportInput(BaseModel):
     target_id:str
     relative_path:str|None=None
     delete_extra:bool=False
+@router.get('/core-systems')
+def core_systems(authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('GET','/v1/system')
+
+@router.post('/core-systems/role')
+def core_systems_role(item:CoreRoleInput,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST','/v1/configure/role',item.model_dump())
+
+@router.post('/core-systems/join-code')
+def core_systems_join_code(authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST','/v1/join-codes',{})
+
+@router.post('/core-systems/join')
+def core_systems_join(item:CoreJoinInput,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST','/v1/configure/join',item.model_dump())
+
+@router.post('/core-systems/sync')
+def core_systems_sync(authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST','/v1/replication/run',{})
+
 @router.get('/catalog/albums')
 def albums(authorization:str|None=Header(default=None)):
     _user(authorization); return {'albums':catalog.album_catalog()}
