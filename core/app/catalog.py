@@ -79,6 +79,25 @@ def sync_unattached_media():
         attached+=1
     return attached
 
+def edition_media_ids(edition_id):
+    with connect() as con:
+        return [int(r['id']) for r in con.execute('SELECT id FROM media WHERE edition_id=? ORDER BY id',(str(edition_id),))]
+
+def album_media_ids(album_id):
+    with connect() as con:
+        return [int(r['id']) for r in con.execute('''SELECT m.id FROM media m JOIN editions e ON e.id=m.edition_id
+            WHERE e.album_id=? ORDER BY e.id,m.id''',(str(album_id),))]
+
+def edition_info(edition_id):
+    with connect() as con:
+        row=con.execute('SELECT * FROM editions WHERE id=?',(str(edition_id),)).fetchone()
+        return dict(row) if row else None
+
+def album_info(album_id):
+    with connect() as con:
+        row=con.execute('SELECT * FROM canonical_albums WHERE id=?',(str(album_id),)).fetchone()
+        return dict(row) if row else None
+
 def album_catalog():
     sync_unattached_media()
     with connect() as con:

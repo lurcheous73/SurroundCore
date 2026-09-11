@@ -1561,28 +1561,63 @@ def admin_media(q: str = Query(default=''), offset: int = Query(default=0, ge=0)
     items=[x for x in list_media() if _media_matches(x,q)]
     return {'total':len(items),'offset':offset,'limit':limit,'items':items[offset:offset+limit]}
 
-@app.delete('/api/v1/admin/media/{media_id}')
-def admin_media_delete(media_id: int, delete_file: bool = Query(default=False),
-                       authorization: str | None = Header(default=None)):
-    _require_admin(authorization)
+def _validated_media_file(media_id):
+    item=get_media(media_id)
+    if not item: raise HTTPException(404,'Media not found')
+    path=item.get('path') or ''
+    roots=[]
+    src=get_source(item.get('source_id')) if item.get('source_id') else None
+    if src and src.get('path'): roots.append(os.path.realpath(src['path']))
+    roots.append(os.path.realpath(os.getenv('SURROUNDCORE_MEDIA','/media')))
+    roots.append(os.path.realpath(os.getenv('SURROUNDCORE_DATA','/data')))
+    real=os.path.realpath(path)
+    if not any(real==r or real.startswith(r.rstrip('/')+'/') for r in roots):
+        raise HTTPException(409,'Refusing to delete a file outside a configured media source')
+    if os.path.exists(real) and not os.path.isfile(real):
+        raise HTTPException(409,'Media path is not a regular file')
+    return item,real
+
+def _delete_media_item(media_id, delete_file=False):
     item=get_media(media_id)
     if not item: raise HTTPException(404,'Media not found')
     path=item.get('path') or ''
     if delete_file:
-        roots=[]
-        src=get_source(item.get('source_id')) if item.get('source_id') else None
-        if src and src.get('path'): roots.append(os.path.realpath(src['path']))
-        roots.append(os.path.realpath(os.getenv('SURROUNDCORE_MEDIA','/media')))
-        roots.append(os.path.realpath(os.getenv('SURROUNDCORE_DATA','/data')))
-        real=os.path.realpath(path)
-        if not any(real==r or real.startswith(r.rstrip('/')+'/') for r in roots):
-            raise HTTPException(409,'Refusing to delete a file outside a configured media source')
+        item,real=_validated_media_file(media_id)
         if os.path.exists(real):
-            if not os.path.isfile(real): raise HTTPException(409,'Media path is not a regular file')
             try: os.unlink(real)
             except OSError as exc: raise HTTPException(409,f'File could not be deleted: {exc}')
     if not delete_media(media_id): raise HTTPException(404,'Media not found')
-    return {'ok':True,'media_id':media_id,'file_deleted':bool(delete_file)}
+    return {'media_id':int(media_id),'file_deleted':bool(delete_file),'path':path}
+
+@app.delete('/api/v1/admin/media/{media_id}')
+def admin_media_delete(media_id: int, delete_file: bool = Query(default=False),
+                       authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {'ok':True,**_delete_media_item(media_id,delete_file)}
+
+@app.delete('/api/v1/admin/catalog/editions/{edition_id}')
+def admin_catalog_edition_delete(edition_id: str, delete_files: bool = Query(default=False),
+                                 authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    info=catalog.edition_info(edition_id)
+    if not info: raise HTTPException(404,'Edition not found')
+    ids=catalog.edition_media_ids(edition_id)
+    if delete_files:
+        for mid in ids: _validated_media_file(mid)
+    deleted=[_delete_media_item(mid,delete_files) for mid in ids]
+    return {'ok':True,'edition_id':edition_id,'deleted_items':deleted,'file_count':len(deleted),'files_deleted':bool(delete_files)}
+
+@app.delete('/api/v1/admin/catalog/albums/{album_id}')
+def admin_catalog_album_delete(album_id: str, delete_files: bool = Query(default=False),
+                               authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    info=catalog.album_info(album_id)
+    if not info: raise HTTPException(404,'Album not found')
+    ids=catalog.album_media_ids(album_id)
+    if delete_files:
+        for mid in ids: _validated_media_file(mid)
+    deleted=[_delete_media_item(mid,delete_files) for mid in ids]
+    return {'ok':True,'album_id':album_id,'deleted_items':deleted,'file_count':len(deleted),'files_deleted':bool(delete_files)}
 
 @app.get('/api/v1/library/audiobooks')
 def library_audiobooks(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
