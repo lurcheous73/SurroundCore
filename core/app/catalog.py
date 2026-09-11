@@ -118,15 +118,33 @@ def update_album(album_id, artist=None, title=None, metadata=None):
                     (artist,title,key,json.dumps(meta),str(album_id)))
     return album_info(album_id)
 
+TRACK_CONFIGS=('2-track','4-track','6-track','8-track','10-track','12-track','14-track','16-track')
+TRACK_FORMATS={'dss':'DSS','cd':'CD','record':'Record','vinyl':'Record','r2r':'Reel-to-reel','reel':'Reel-to-reel','reel-to-reel':'Reel-to-reel'}
+
+def normalise_track_config(value):
+    if value in (None,''): return None
+    raw=str(value).strip().casefold().replace('_','-').replace(' ','-')
+    raw=raw if raw.endswith('-track') else raw+'-track'
+    if raw not in TRACK_CONFIGS: raise ValueError('track configuration must be 2, 4, 6, 8, 10, 12, 14 or 16 track')
+    return raw
+
+def normalise_source_format(value):
+    if value is None: return None
+    raw=str(value).strip(); return TRACK_FORMATS.get(raw.casefold(),raw)
+
 def update_edition(edition_id, title=None, media_type=None, source_format=None, release_year=None, metadata=None):
     with connect() as con:
         row=con.execute('SELECT * FROM editions WHERE id=?',(str(edition_id),)).fetchone()
         if not row: return None
         meta=json.loads(row['metadata_json'] or '{}')
-        if metadata is not None: meta.update(metadata)
+        if metadata is not None:
+            incoming=dict(metadata)
+            if 'track_config' in incoming:
+                incoming['track_config']=normalise_track_config(incoming.get('track_config'))
+            meta.update(incoming)
         values=(str(title if title is not None else row['title']).strip() or 'Standard edition',
                 media_type if media_type is not None else row['media_type'],
-                source_format if source_format is not None else row['source_format'],
+                normalise_source_format(source_format) if source_format is not None else row['source_format'],
                 release_year if release_year is not None else row['release_year'],json.dumps(meta),str(edition_id))
         con.execute('UPDATE editions SET title=?,media_type=?,source_format=?,release_year=?,metadata_json=? WHERE id=?',values)
     return edition_info(edition_id)
