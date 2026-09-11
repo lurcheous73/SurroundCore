@@ -59,7 +59,7 @@ def _node(method,path,payload=None):
     token=os.getenv('SURROUNDCORE_NODE_TOKEN','')
     if not token: raise HTTPException(503,'Core Systems service is not configured')
     try:
-        with httpx.Client(timeout=35) as client:
+        with httpx.Client(timeout=120) as client:
             r=client.request(method,NODE_URL+path,json=payload,
                              headers={'Authorization':'Bearer '+token})
     except Exception as exc:
@@ -151,6 +151,42 @@ def core_systems_join(item:CoreJoinInput,authorization:str|None=Header(default=N
 def core_systems_sync(authorization:str|None=Header(default=None)):
     _admin(authorization)
     return _node('POST','/v1/replication/run',{})
+
+
+@router.get('/core-systems/maintenance')
+def core_systems_maintenance(authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('GET','/v1/maintenance/local')
+
+@router.get('/core-systems/nodes/{node_id}/maintenance')
+def core_node_maintenance(node_id:str,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('GET',f'/v1/nodes/{node_id}/maintenance/status')
+
+@router.get('/core-systems/nodes/{node_id}/storage/disks')
+def core_node_storage_disks(node_id:str,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('GET',f'/v1/nodes/{node_id}/storage/disks')
+
+@router.get('/core-systems/nodes/{node_id}/storage/pools')
+def core_node_storage_pools(node_id:str,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('GET',f'/v1/nodes/{node_id}/storage/pools')
+
+@router.post('/core-systems/nodes/{node_id}/storage/disks/wipe')
+def core_node_storage_wipe(node_id:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST',f'/v1/nodes/{node_id}/storage/disks/wipe',payload)
+
+@router.post('/core-systems/nodes/{node_id}/storage/pools')
+def core_node_storage_pool_create(node_id:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST',f'/v1/nodes/{node_id}/storage/pools',payload)
+
+@router.delete('/core-systems/nodes/{node_id}/storage/pools/{name}')
+def core_node_storage_pool_destroy(node_id:str,name:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('DELETE',f'/v1/nodes/{node_id}/storage/pools/{name}',payload)
 
 @router.get('/catalog/albums')
 def albums(authorization:str|None=Header(default=None)):
