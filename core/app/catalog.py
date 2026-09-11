@@ -79,6 +79,11 @@ def sync_unattached_media():
         attached+=1
     return attached
 
+def media_album_id(media_id):
+    with connect() as con:
+        row=con.execute("""SELECT e.album_id FROM media m JOIN editions e ON e.id=m.edition_id WHERE m.id=?""",(int(media_id),)).fetchone()
+        return row['album_id'] if row else None
+
 def edition_media_ids(edition_id):
     with connect() as con:
         return [int(r['id']) for r in con.execute('SELECT id FROM media WHERE edition_id=? ORDER BY id',(str(edition_id),))]
@@ -98,6 +103,82 @@ def album_info(album_id):
         row=con.execute('SELECT * FROM canonical_albums WHERE id=?',(str(album_id),)).fetchone()
         return dict(row) if row else None
 
+def update_album(album_id, artist=None, title=None, metadata=None):
+    with connect() as con:
+        row=con.execute('SELECT * FROM canonical_albums WHERE id=?',(str(album_id),)).fetchone()
+        if not row: return None
+        artist=str(artist if artist is not None else row['artist']).strip() or 'Unknown Artist'
+        title=str(title if title is not None else row['title']).strip() or 'Unknown Album'
+        meta=json.loads(row['metadata_json'] or '{}')
+        if metadata is not None: meta.update(metadata)
+        key=_slug(artist)+'|'+_slug(title)
+        clash=con.execute('SELECT id FROM canonical_albums WHERE sort_key=? AND id<>?',(key,str(album_id))).fetchone()
+        if clash: raise ValueError('album already exists')
+        con.execute('UPDATE canonical_albums SET artist=?,title=?,sort_key=?,metadata_json=? WHERE id=?',
+                    (artist,title,key,json.dumps(meta),str(album_id)))
+    return album_info(album_id)
+
+def update_edition(edition_id, title=None, media_type=None, source_format=None, release_year=None, metadata=None):
+    with connect() as con:
+        row=con.execute('SELECT * FROM editions WHERE id=?',(str(edition_id),)).fetchone()
+        if not row: return None
+        meta=json.loads(row['metadata_json'] or '{}')
+        if metadata is not None: meta.update(metadata)
+        values=(str(title if title is not None else row['title']).strip() or 'Standard edition',
+                media_type if media_type is not None else row['media_type'],
+                source_format if source_format is not None else row['source_format'],
+                release_year if release_year is not None else row['release_year'],json.dumps(meta),str(edition_id))
+        con.execute('UPDATE editions SET title=?,media_type=?,source_format=?,release_year=?,metadata_json=? WHERE id=?',values)
+    return edition_info(edition_id)
+
+def update_media_tags(media_id, metadata):
+    media=get_media(media_id)
+    if not media: return None
+    tags=dict(media.get('metadata') or {}); tags.update(metadata or {})
+    with connect() as con:
+        con.execute('UPDATE media SET metadata_json=? WHERE id=?',(json.dumps(tags),int(media_id)))
+    return get_media(media_id)
+
+def move_media_to_edition(media_id, edition_id):
+    if not edition_info(edition_id): raise ValueError('edition not found')
+    if not get_media(media_id): return False
+    with connect() as con: con.execute('UPDATE media SET edition_id=? WHERE id=?',(str(edition_id),int(media_id)))
+    return True
+
+def merge_editions(source_id,target_id):
+    if source_id==target_id: return False
+    src=edition_info(source_id); dst=edition_info(target_id)
+    if not src or not dst: return False
+    with connect() as con:
+        con.execute('UPDATE media SET edition_id=? WHERE edition_id=?',(str(target_id),str(source_id)))
+        con.execute('DELETE FROM editions WHERE id=?',(str(source_id),))
+        if con.execute('SELECT COUNT(*) FROM editions WHERE album_id=?',(src['album_id'],)).fetchone()[0]==0:
+            con.execute('DELETE FROM canonical_albums WHERE id=?',(src['album_id'],))
+    return True
+
+def move_edition_to_album(edition_id, album_id):
+    if not edition_info(edition_id) or not album_info(album_id): return False
+    with connect() as con: con.execute('UPDATE editions SET album_id=? WHERE id=?',(str(album_id),str(edition_id)))
+    return True
+
+def split_edition_to_album(edition_id, artist, title):
+    src=edition_info(edition_id)
+    if not src: return None
+    old_album=src['album_id']; new_album=ensure_album(artist,title)
+    move_edition_to_album(edition_id,new_album)
+    with connect() as con:
+        if con.execute('SELECT COUNT(*) FROM editions WHERE album_id=?',(old_album,)).fetchone()[0]==0:
+            con.execute('DELETE FROM canonical_albums WHERE id=?',(old_album,))
+    return new_album
+
+def merge_albums(source_id,target_id):
+    if source_id==target_id: return False
+    if not album_info(source_id) or not album_info(target_id): return False
+    with connect() as con:
+        con.execute('UPDATE editions SET album_id=? WHERE album_id=?',(str(target_id),str(source_id)))
+        con.execute('DELETE FROM canonical_albums WHERE id=?',(str(source_id),))
+    return True
+
 def album_catalog():
     sync_unattached_media()
     with connect() as con:
@@ -106,7 +187,9 @@ def album_catalog():
             item=dict(a);item['metadata']=json.loads(item.pop('metadata_json') or '{}');item['editions']=[]
             for e in con.execute('SELECT * FROM editions WHERE album_id=? ORDER BY title COLLATE NOCASE',(item['id'],)):
                 ed=dict(e);ed['metadata']=json.loads(ed.pop('metadata_json') or '{}')
-                ed['tracks']=[dict(x) for x in con.execute('SELECT id,path,codec,channels,sample_rate,bit_depth,origin,source_identifier,export_blocked FROM media WHERE edition_id=? ORDER BY path',(ed['id'],))]
+                ed['tracks']=[]
+                for x in con.execute('SELECT id,path,codec,channels,sample_rate,bit_depth,origin,source_identifier,source_serial,content_hash,export_blocked,metadata_json FROM media WHERE edition_id=? ORDER BY path',(ed['id'],)):
+                    tr=dict(x); tr['metadata']=json.loads(tr.pop('metadata_json') or '{}'); ed['tracks'].append(tr)
                 item['editions'].append(ed)
             albums.append(item)
     return albums

@@ -1,4 +1,6 @@
 import hmac
+import base64
+import subprocess
 import concurrent.futures
 import json
 import os
@@ -248,6 +250,32 @@ class QueueInput(BaseModel):
 class QueueAddInput(BaseModel):
     media_id: int
 
+
+class CatalogAlbumInput(BaseModel):
+    artist: Optional[str] = None
+    title: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
+
+class CatalogEditionInput(BaseModel):
+    title: Optional[str] = None
+    media_type: Optional[str] = None
+    source_format: Optional[str] = None
+    release_year: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
+
+class CatalogTrackInput(BaseModel):
+    metadata: dict = Field(default_factory=dict)
+    edition_id: Optional[str] = None
+
+class CatalogMergeInput(BaseModel):
+    target_id: str
+
+class CatalogSplitInput(BaseModel):
+    artist: str
+    title: str
+
+class CatalogArtworkInput(BaseModel):
+    data_base64: str
 
 @app.on_event('startup')
 def startup():
@@ -1554,6 +1582,69 @@ def _is_audiobook(item):
             'audiobooks' in path or 'audiobook' in genre or 'spoken word' in genre)
 
 
+@app.put('/api/v1/admin/catalog/albums/{album_id}')
+def admin_catalog_album_update(album_id: str, body: CatalogAlbumInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    try: item=catalog.update_album(album_id,body.artist,body.title,body.metadata)
+    except ValueError as exc: raise HTTPException(409,str(exc))
+    if not item: raise HTTPException(404,'Album not found')
+    return {'ok':True,'album':item}
+
+@app.put('/api/v1/admin/catalog/editions/{edition_id}')
+def admin_catalog_edition_update(edition_id: str, body: CatalogEditionInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    item=catalog.update_edition(edition_id,body.title,body.media_type,body.source_format,body.release_year,body.metadata)
+    if not item: raise HTTPException(404,'Edition not found')
+    return {'ok':True,'edition':item}
+
+@app.put('/api/v1/admin/catalog/tracks/{media_id}')
+def admin_catalog_track_update(media_id: int, body: CatalogTrackInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    item=catalog.update_media_tags(media_id,body.metadata)
+    if not item: raise HTTPException(404,'Media not found')
+    if body.edition_id:
+        try: catalog.move_media_to_edition(media_id,body.edition_id)
+        except ValueError as exc: raise HTTPException(404,str(exc))
+    return {'ok':True,'media':get_media(media_id)}
+
+@app.post('/api/v1/admin/catalog/albums/{album_id}/merge')
+def admin_catalog_album_merge(album_id: str, body: CatalogMergeInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    if not catalog.merge_albums(album_id,body.target_id): raise HTTPException(404,'Album not found or target invalid')
+    return {'ok':True,'source_id':album_id,'target_id':body.target_id}
+
+@app.post('/api/v1/admin/catalog/editions/{edition_id}/merge')
+def admin_catalog_edition_merge(edition_id: str, body: CatalogMergeInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    if not catalog.merge_editions(edition_id,body.target_id): raise HTTPException(404,'Edition not found or target invalid')
+    return {'ok':True,'source_id':edition_id,'target_id':body.target_id}
+
+@app.post('/api/v1/admin/catalog/editions/{edition_id}/split')
+def admin_catalog_edition_split(edition_id: str, body: CatalogSplitInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    album_id=catalog.split_edition_to_album(edition_id,body.artist,body.title)
+    if not album_id: raise HTTPException(404,'Edition not found')
+    return {'ok':True,'album_id':album_id}
+
+@app.put('/api/v1/admin/catalog/albums/{album_id}/artwork')
+def admin_catalog_artwork(album_id: str, body: CatalogArtworkInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    if not catalog.album_info(album_id): raise HTTPException(404,'Album not found')
+    try: raw=base64.b64decode(body.data_base64,validate=True)
+    except Exception: raise HTTPException(400,'Invalid artwork data')
+    if not raw or len(raw)>15*1024*1024: raise HTTPException(400,'Artwork must be between 1 byte and 15 MB')
+    root=os.path.join(os.getenv('SURROUNDCORE_DATA','/data'),'artwork-overrides'); os.makedirs(root,exist_ok=True)
+    src=os.path.join(root,album_id+'.upload'); dst=os.path.join(root,album_id+'.jpg')
+    with open(src,'wb') as f: f.write(raw)
+    try:
+        proc=subprocess.run(['ffmpeg','-y','-v','error','-i',src,'-frames:v','1','-q:v','2',dst],capture_output=True,timeout=15)
+        if proc.returncode!=0 or not os.path.isfile(dst): raise HTTPException(400,'Artwork is not a supported image')
+    finally:
+        try: os.unlink(src)
+        except OSError: pass
+    catalog.update_album(album_id,metadata={'artwork_override':dst})
+    return {'ok':True,'album_id':album_id}
+
 @app.get('/api/v1/admin/media')
 def admin_media(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
                 limit: int = Query(default=250, ge=1, le=5000), authorization: str | None = Header(default=None)):
@@ -1660,8 +1751,17 @@ def media_artwork(media_id: int, token: str | None = Query(default=None), author
     item=get_media(media_id)
     if not item: raise HTTPException(404,'Media not found')
     try:
-        source=dict(item); source['path']=_resolved_media(item)
-        data=artwork.cover_bytes(source)
+        data=None
+        album_id=catalog.media_album_id(media_id)
+        if album_id:
+            info=catalog.album_info(album_id) or {}
+            try: meta=json.loads(info.get('metadata_json') or '{}')
+            except Exception: meta={}
+            override=meta.get('artwork_override')
+            if override and os.path.isfile(override): data=open(override,'rb').read()
+        if data is None:
+            source=dict(item); source['path']=_resolved_media(item)
+            data=artwork.cover_bytes(source)
     except Exception:
         data=None
     if not data: raise HTTPException(404,'Artwork not found')
