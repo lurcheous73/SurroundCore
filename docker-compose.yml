@@ -99,3 +99,13 @@ services:
       SURROUNDCORE_CONTROLMAC_MAX_GB: ${SURROUNDCORE_CONTROLMAC_MAX_GB:-0}
     volumes:
       - ${SURROUNDCORE_INGEST_LIBRARY:-/srv/surroundcore/sources/ingest}:/library
+  surround-remote:
+    build: ./remote-agent
+    container_name: surround-remote
+    restart: unless-stopped
+    profiles: ["remote"]
+    network_mode: host
+    environment:
+      SURROUNDCORE_REMOTE_MODE: ${SURROUNDCORE_REMOTE_MODE:-unconfigured}
+      SURROUNDCORE_CORE_URL: http://127.0.0.1:8080
+      SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
