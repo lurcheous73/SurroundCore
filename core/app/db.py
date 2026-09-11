@@ -98,6 +98,40 @@ def get_media(media_id):
         row=con.execute('SELECT * FROM media WHERE id=?',(media_id,)).fetchone()
         return _media_row(row) if row else None
 
+
+def delete_media(media_id):
+    media_id=int(media_id)
+    with connect() as con:
+        row=con.execute('SELECT id,edition_id FROM media WHERE id=?',(media_id,)).fetchone()
+        if not row: return False
+        edition_id=row['edition_id'] if 'edition_id' in row.keys() else None
+        for q in con.execute('SELECT user_id,endpoint_id,queue_json FROM user_zone_queues').fetchall():
+            try: ids=json.loads(q['queue_json'] or '[]')
+            except Exception: ids=[]
+            clean=[x for x in ids if int(x)!=media_id]
+            if clean!=ids:
+                con.execute('UPDATE user_zone_queues SET queue_json=? WHERE user_id=? AND endpoint_id=?',
+                            (json.dumps(clean),q['user_id'],q['endpoint_id']))
+        for pl in con.execute('SELECT id,items_json FROM playlists').fetchall():
+            try: items=json.loads(pl['items_json'] or '[]')
+            except Exception: items=[]
+            clean=[]
+            for item in items:
+                try: mid=int(item.get('media_id')) if isinstance(item,dict) else int(item)
+                except Exception: mid=None
+                if mid!=media_id: clean.append(item)
+            if clean!=items: con.execute('UPDATE playlists SET items_json=? WHERE id=?',(json.dumps(clean),pl['id']))
+        con.execute('UPDATE playback_history SET media_id=NULL WHERE media_id=?',(media_id,))
+        con.execute('DELETE FROM media WHERE id=?',(media_id,))
+        if edition_id:
+            remaining=con.execute('SELECT COUNT(*) FROM media WHERE edition_id=?',(edition_id,)).fetchone()[0]
+            if remaining==0:
+                album=con.execute('SELECT album_id FROM editions WHERE id=?',(edition_id,)).fetchone()
+                con.execute('DELETE FROM editions WHERE id=?',(edition_id,))
+                if album and con.execute('SELECT COUNT(*) FROM editions WHERE album_id=?',(album['album_id'],)).fetchone()[0]==0:
+                    con.execute('DELETE FROM canonical_albums WHERE id=?',(album['album_id'],))
+    return True
+
 def upsert_endpoint(item):
     caps=json.dumps(item.get('capabilities') or {})
     with connect() as con:

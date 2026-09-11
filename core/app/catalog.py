@@ -1,6 +1,6 @@
 import hashlib, json, re, time, uuid
 from pathlib import Path
-from .db import connect, get_media
+from .db import connect, get_media, list_media
 
 def _slug(value):
     value=re.sub(r'[^a-z0-9]+','-',str(value or '').casefold()).strip('-')
@@ -64,7 +64,23 @@ def attach_media(media_id,origin=None,source_identifier=None,source_serial=None,
           1 if export_blocked else 0,time.time(),int(media_id)))
     return {'album_id':aid,'edition_id':eid}
 
+def sync_unattached_media():
+    attached=0
+    for media in list_media():
+        if media.get('edition_id'): continue
+        tags=media.get('metadata') or {}
+        artist=tags.get('album_artist') or tags.get('artist') or 'Unknown Artist'
+        album=tags.get('album') or Path(media.get('path','Unknown Album')).parent.name
+        aid=ensure_album(artist,album)
+        edition=tags.get('edition') or tags.get('version') or media.get('origin') or media.get('source_id') or 'Standard edition'
+        eid=ensure_edition(aid,edition,tags.get('media_type'),media.get('codec'),tags.get('date') or tags.get('year'))
+        with connect() as con:
+            con.execute('UPDATE media SET edition_id=? WHERE id=?',(eid,int(media['id'])))
+        attached+=1
+    return attached
+
 def album_catalog():
+    sync_unattached_media()
     with connect() as con:
         albums=[]
         for a in con.execute('SELECT * FROM canonical_albums ORDER BY artist COLLATE NOCASE,title COLLATE NOCASE'):

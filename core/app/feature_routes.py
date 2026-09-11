@@ -6,6 +6,7 @@ from . import catalog, recordings, userauth, metadata_connectors, output_profile
 
 router=APIRouter(prefix='/api/v1')
 STORAGE_URL=os.getenv('SURROUNDCORE_STORAGE_URL','http://127.0.0.1:8084').rstrip('/')
+MERIDIAN_URL=os.getenv('SURROUNDCORE_MERIDIAN_URL','http://127.0.0.1:8091').rstrip('/')
 
 
 def _supplied(authorization):
@@ -37,6 +38,30 @@ def _storage(method,path,payload=None):
     if r.status_code>=400: raise HTTPException(r.status_code,data.get('detail') or data.get('error') or r.text)
     return data
 
+
+def _register_library_target(item,payload):
+    if str((payload or {}).get('use') or 'library')!='library' or not item.get('path'):
+        return item
+    from .db import save_source
+    sid='storage-'+str(item.get('id') or hashlib.sha1(item['path'].encode()).hexdigest()[:16])
+    save_source({'id':sid,'name':item.get('name') or sid,'kind':item.get('kind') or 'local',
+                 'path':item['path'],'cache_policy':'off','config':{'storage_target':item.get('id')},'enabled':True})
+    item=dict(item); item['library_source_id']=sid
+    return item
+
+
+def _meridian(method,path,payload=None):
+    token=os.getenv('SURROUNDCORE_TOKEN','')
+    try:
+        with httpx.Client(timeout=30) as client:
+            r=client.request(method,MERIDIAN_URL+path,json=payload,headers={'Authorization':'Bearer '+token})
+    except Exception as exc:
+        raise HTTPException(502,f'Meridian helper unavailable: {exc}')
+    try: data=r.json()
+    except Exception: data={'detail':r.text}
+    if r.status_code>=400: raise HTTPException(r.status_code,data.get('detail') or r.text)
+    return data
+
 class PlaylistInput(BaseModel):
     name:str; items:list=Field(default_factory=list); kind:str='playlist'; metadata:dict=Field(default_factory=dict)
 
@@ -51,6 +76,11 @@ class ImportRecordingInput(BaseModel):
 
 class OutputProfileInput(BaseModel):
     name:str|None=None; transport:str|None=None; settings:dict|None=None
+
+class MediaExportInput(BaseModel):
+    target_id:str
+    relative_path:str|None=None
+    delete_extra:bool=False
 @router.get('/catalog/albums')
 def albums(authorization:str|None=Header(default=None)):
     _user(authorization); return {'albums':catalog.album_catalog()}
@@ -73,6 +103,30 @@ def playlist_save(item:PlaylistInput,authorization:str|None=Header(default=None)
 @router.get('/metadata/providers')
 def metadata_providers(authorization:str|None=Header(default=None)):
     _user(authorization); return {'providers':metadata_connectors.catalog()}
+
+@router.get('/metadata/{provider_id}/search')
+def metadata_search(provider_id:str,q:str='',artist:str|None=None,album:str|None=None,track:str|None=None,limit:int=20,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    try: return metadata_connectors.search(provider_id,q,artist,album,track,limit)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    except Exception as exc: raise HTTPException(502,f'Metadata lookup failed: {exc}')
+
+@router.get('/metadata/listenbrainz/{username}/history')
+def metadata_listenbrainz_history(username:str,count:int=100,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    try: return metadata_connectors.listenbrainz_history(username,count)
+    except Exception as exc: raise HTTPException(502,f'ListenBrainz lookup failed: {exc}')
+
+@router.get('/meridian/zones')
+def meridian_zones(authorization:str|None=Header(default=None)):
+    _admin(authorization); return _meridian('GET','/v1/status')
+
+@router.post('/meridian/{action}')
+def meridian_control(action:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    if action not in ('wake','transport','volume','mute','pair'):
+        raise HTTPException(400,'Unsupported Meridian action')
+    return _meridian('POST','/v1/'+action,payload)
 
 @router.get('/recordings/capabilities')
 def recording_capabilities(authorization:str|None=Header(default=None)):
@@ -139,15 +193,19 @@ def storage_rclone(authorization:str|None=Header(default=None)):
     _admin(authorization); return _storage('GET','/v1/rclone/remotes')
 @router.post('/storage/usb/connect')
 def storage_usb_connect(payload:dict,authorization:str|None=Header(default=None)):
-    _admin(authorization); return _storage('POST','/v1/usb/connect',payload)
+    _admin(authorization)
+    return _register_library_target(_storage('POST','/v1/usb/connect',payload),payload)
 
 @router.post('/storage/network/connect')
 def storage_share_connect(payload:dict,authorization:str|None=Header(default=None)):
-    _admin(authorization); return _storage('POST','/v1/network/connect',payload)
+    _admin(authorization)
+    return _register_library_target(_storage('POST','/v1/network/connect',payload),payload)
 
 @router.post('/storage/cloud/connect')
 def storage_cloud_connect(payload:dict,authorization:str|None=Header(default=None)):
-    _admin(authorization); return _storage('POST','/v1/cloud/connect',payload)
+    _admin(authorization)
+    result=_storage('POST','/v1/cloud/connect',payload)
+    return result if result.get('authorization_required') else _register_library_target(result,payload)
 
 @router.post('/storage/copy')
 def storage_copy(payload:dict,authorization:str|None=Header(default=None)):
@@ -174,3 +232,24 @@ def controlmac_register(item:ControlMacRegisterInput,authorization:str|None=Head
     if not media: raise HTTPException(502,'uploaded media could not be indexed')
     return {'ok':True,'media_id':media.get('id'),'album':item.album,'edition':item.edition,
             'origin':item.origin,'content_hash':item.content_hash}
+
+@router.get('/media/{media_id}/export-check')
+def media_export_check(media_id:int,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    from .db import get_media
+    media=get_media(media_id)
+    if not media: raise HTTPException(404,'Media not found')
+    blocked=bool(media.get('export_blocked'))
+    return {'media_id':media_id,'export_allowed':not blocked,'export_blocked':blocked,
+            'origin':media.get('origin'),'reason':'Source policy blocks export' if blocked else None}
+
+@router.post('/media/{media_id}/export-to-backup')
+def media_export_to_backup(media_id:int,item:MediaExportInput,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    from .db import get_media
+    media=get_media(media_id)
+    if not media: raise HTTPException(404,'Media not found')
+    if bool(media.get('export_blocked')):
+        raise HTTPException(403,'This recording is playback-only and cannot be exported')
+    return _storage('POST','/v1/copy',{'source':media['path'],'target_id':item.target_id,
+        'relative_path':item.relative_path,'delete_extra':item.delete_extra})

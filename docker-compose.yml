@@ -18,6 +18,8 @@ services:
       SURROUNDCORE_SPOTIFY_SOLOIST: ${SURROUNDCORE_SPOTIFY_SOLOIST:-/opt/spotify/soloist}
       SURROUNDCORE_AIRPLAY_CLI: ${SURROUNDCORE_AIRPLAY_CLI:-/opt/airplay/cliairplay-linux-x86_64}
       SURROUNDCORE_AIRPLAY_BIND_IP: ${SURROUNDCORE_AIRPLAY_BIND_IP:-}
+      SURROUNDCORE_STORAGE_URL: http://127.0.0.1:8084
+      SURROUNDCORE_MERIDIAN_URL: http://127.0.0.1:8091
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data
@@ -70,6 +72,19 @@ services:
       - ${SURROUNDCORE_SOURCES:-/srv/surroundcore/sources}:/sources:rshared
       - ${SURROUNDCORE_BACKUP:-/srv/surroundcore/backup}:/backup:rshared
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}/storage:/var/lib/surroundcore/storage
+  surround-meridian:
+    build: ./meridian
+    container_name: surround-meridian
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SURROUNDCORE_TOKEN: ${SURROUNDCORE_TOKEN}
+      SURROUNDCORE_MERIDIAN_CORE: ${SURROUNDCORE_MERIDIAN_CORE:-}
+      SURROUNDCORE_MERIDIAN_PORT: 8091
+      SURROUNDCORE_MERIDIAN_SERIAL: ${SURROUNDCORE_MERIDIAN_SERIAL:-}
+    volumes:
+      - ${SURROUNDCORE_MERIDIAN_VENDOR_DIR:-/opt/surroundcore/meridian-vendor}:/vendor:ro
+
   controlmac-ingest:
     build: ./controlmac-ingest
     container_name: controlmac-ingest

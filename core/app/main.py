@@ -36,7 +36,7 @@ from .sources import (SOURCE_KINDS, CACHE_POLICIES, validate_source, source_stat
                       media_path, cache_file, purge_source_cache, cache_stats)
 from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, list_endpoints,
                  save_group, list_groups, get_group, delete_group, update_group_latency,
-                 save_source, list_sources, get_source, delete_source, prune_source_media)
+                 save_source, list_sources, get_source, delete_source, prune_source_media, delete_media)
 from .groups import GroupPlayback
 from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols, catalog, output_profiles, transport
 
@@ -223,6 +223,8 @@ class WebLoginInput(BaseModel):
     username: str
     password: str
 
+class CoreRecoveryInput(BaseModel):
+    core_key: str
 
 class WebBootstrapInput(BaseModel):
     username: str
@@ -251,7 +253,9 @@ class QueueAddInput(BaseModel):
 def startup():
     init_db()
     userauth.init_auth_db()
+    userauth.ensure_default_admin()
     catalog.init_catalog()
+    catalog.sync_unattached_media()
     try:
         cfg=(load_provider_secrets().get('spotify') or {})
         if cfg.get('api_key') and spotify_soloist.binary(cfg):
@@ -400,7 +404,22 @@ def auth_login(item: WebLoginInput):
     if not result:
         raise HTTPException(401, 'Invalid username or password')
     token, user, expires = result
-    return {'ok': True, 'token': token, 'expires_at': expires, 'user': user}
+    response={'ok': True, 'token': token, 'expires_at': expires, 'user': user}
+    if user.get('role')=='admin' and userauth.take_core_key_reveal():
+        response['core_key']=os.getenv('SURROUNDCORE_TOKEN','')
+        response['core_key_notice']='Save this recovery key somewhere safe. It is not your browser session credential.'
+    return response
+
+
+@app.post('/api/v1/auth/recover')
+def auth_recover(item: CoreRecoveryInput):
+    expected=os.getenv('SURROUNDCORE_TOKEN','')
+    if not expected or not item.core_key or not hmac.compare_digest(expected,item.core_key):
+        raise HTTPException(401,'Invalid Core recovery key')
+    result=userauth.recover_admin_default()
+    if not result: raise HTTPException(500,'Admin recovery failed')
+    token,user,expires=result
+    return {'ok':True,'token':token,'expires_at':expires,'user':user,'temporary_credentials':{'username':'admin','password':'password'}}
 
 
 @app.post('/api/v1/auth/bootstrap')
@@ -469,10 +488,15 @@ def admin_user_update(user_id: int, item: WebUserInput, authorization: str | Non
 
 @app.delete('/api/v1/admin/users/{user_id}')
 def admin_user_delete(user_id: int, authorization: str | None = Header(default=None)):
-    _require_admin(authorization)
-    if not userauth.delete_user(user_id):
-        raise HTTPException(404, 'User not found')
-    return {'ok': True}
+    actor, _token = _require_admin(authorization)
+    victim=userauth.get_user(user_id)
+    if not victim: raise HTTPException(404, 'User not found')
+    if not actor.get('master') and int(actor.get('id') or 0)==int(user_id):
+        raise HTTPException(409, 'You cannot delete the account you are currently using')
+    if victim.get('role')=='admin' and victim.get('enabled') and userauth.admin_count()<=1:
+        raise HTTPException(409, 'Cannot delete the last enabled administrator')
+    userauth.delete_user(user_id)
+    return {'ok': True, 'deleted_user': user_id}
 
 
 def _queue_view(user, endpoint_id):
@@ -554,6 +578,36 @@ async def ingest_proxy(ingest_path: str, request: Request, authorization: str | 
     return Response(content=upstream.content, status_code=upstream.status_code, media_type=response_type)
 
 
+def _meridian_zone_candidates():
+    url=os.getenv('SURROUNDCORE_MERIDIAN_URL','http://127.0.0.1:8091').rstrip('/')
+    token=os.getenv('SURROUNDCORE_TOKEN','')
+    if not token: return []
+    try:
+        r=httpx.get(url+'/v1/status',headers={'Authorization':'Bearer '+token},timeout=3.5)
+        if r.status_code>=400: return []
+        return (r.json() or {}).get('zones') or []
+    except Exception:
+        return []
+
+def _name_key(value):
+    return ''.join(ch for ch in str(value or '').casefold() if ch.isalnum())
+
+def _attach_meridian_zone_ids(items):
+    zones=_meridian_zone_candidates()
+    if not zones: return
+    for endpoint in items:
+        if endpoint.get('kind')!='meridian': continue
+        caps=dict(endpoint.get('capabilities') or {})
+        if caps.get('sooloos_zone_id'): continue
+        names=[endpoint.get('name'),caps.get('zone'),caps.get('device_id'),caps.get('serial')]
+        keys={_name_key(x) for x in names if x}
+        matches=[z for z in zones if _name_key(z.get('name')) in keys]
+        if len(matches)==1:
+            caps['sooloos_zone_id']=matches[0].get('zone_id')
+            caps['sooloos_zone_name']=matches[0].get('name')
+            caps['control_bridge']=True
+            endpoint['capabilities']=caps
+
 def _all_endpoints(force=False):
     with _ENDPOINT_CACHE_LOCK:
         if not force and time.time()-_ENDPOINT_CACHE['at'] < _ENDPOINT_CACHE_SECONDS:
@@ -578,6 +632,7 @@ def _all_endpoints(force=False):
         if endpoint.get('kind')=='meridian':
             caps=dict(endpoint.get('capabilities') or {}); caps['model']=overrides.get(endpoint.get('id')) or caps.get('model') or 'Meridian / Sooloos'; endpoint['capabilities']=caps
     result=list(combined.values())
+    _attach_meridian_zone_ids(result)
     with _ENDPOINT_CACHE_LOCK:
         _ENDPOINT_CACHE['at']=time.time(); _ENDPOINT_CACHE['items']=[dict(x) for x in result]
     return result
@@ -861,7 +916,9 @@ def streaming_play(item: ProviderPlayInput, authorization: str | None = Header(d
     else:
         raise HTTPException(501, f'{item.provider} playback module is not installed')
     try:
-        return _play_external(endpoint, url, item.device, None, title, 'radio' if item.provider=='internet_radio' else item.provider)
+        result=_play_external(endpoint, url, item.device, None, title, 'radio' if item.provider=='internet_radio' else item.provider)
+        catalog.log_play(None if _user.get('master') else _user.get('id'),item.endpoint_id,None,'radio' if item.provider=='internet_radio' else 'streaming',item.provider,{'item_id':item.item_id,'title':title})
+        return result
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
@@ -1497,6 +1554,36 @@ def _is_audiobook(item):
             'audiobooks' in path or 'audiobook' in genre or 'spoken word' in genre)
 
 
+@app.get('/api/v1/admin/media')
+def admin_media(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
+                limit: int = Query(default=250, ge=1, le=5000), authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    items=[x for x in list_media() if _media_matches(x,q)]
+    return {'total':len(items),'offset':offset,'limit':limit,'items':items[offset:offset+limit]}
+
+@app.delete('/api/v1/admin/media/{media_id}')
+def admin_media_delete(media_id: int, delete_file: bool = Query(default=False),
+                       authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    item=get_media(media_id)
+    if not item: raise HTTPException(404,'Media not found')
+    path=item.get('path') or ''
+    if delete_file:
+        roots=[]
+        src=get_source(item.get('source_id')) if item.get('source_id') else None
+        if src and src.get('path'): roots.append(os.path.realpath(src['path']))
+        roots.append(os.path.realpath(os.getenv('SURROUNDCORE_MEDIA','/media')))
+        roots.append(os.path.realpath(os.getenv('SURROUNDCORE_DATA','/data')))
+        real=os.path.realpath(path)
+        if not any(real==r or real.startswith(r.rstrip('/')+'/') for r in roots):
+            raise HTTPException(409,'Refusing to delete a file outside a configured media source')
+        if os.path.exists(real):
+            if not os.path.isfile(real): raise HTTPException(409,'Media path is not a regular file')
+            try: os.unlink(real)
+            except OSError as exc: raise HTTPException(409,f'File could not be deleted: {exc}')
+    if not delete_media(media_id): raise HTTPException(404,'Media not found')
+    return {'ok':True,'media_id':media_id,'file_deleted':bool(delete_file)}
+
 @app.get('/api/v1/library/audiobooks')
 def library_audiobooks(q: str = Query(default=''), offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=500, ge=1, le=5000), authorization: str | None = Header(default=None)):
@@ -1659,6 +1746,7 @@ def endpoint_play(endpoint_id: str, item: EndpointPlayRequest, authorization: st
             'mode': plan.get('mode', 'direct'), 'source': plan.get('source'),
         }, _agent_token())
     session = sessions.start_library(endpoint_id, [media], position_seconds=item.position_seconds, plan=plan)
+    catalog.log_play(None if _user.get('master') else _user.get('id'),endpoint_id,item.media_id,'library',None,{'device':item.device})
     return {'ok': True, 'endpoint': endpoint_id, 'volume': volume, 'plan': plan, 'session': session, 'result': result}
 
 
@@ -1676,7 +1764,10 @@ def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authori
     volume = max(0.0, min(float(item.volume), 1.0))
     if endpoint.get('kind') in ('sonos','airplay','upnp','cast'):
         try:
-            return _play_compat_programme(endpoint, media, item.media_ids, token, volume, item.position_seconds)
+            result=_play_compat_programme(endpoint, media, item.media_ids, token, volume, item.position_seconds)
+            for media_id in item.media_ids:
+                catalog.log_play(None if _user.get('master') else _user.get('id'),endpoint_id,media_id,'library',None,{'programme':True,'device':item.device})
+            return result
         except Exception as exc:
             raise HTTPException(502, str(exc))
     settings = load_settings()
@@ -1697,6 +1788,8 @@ def endpoint_programme(endpoint_id: str, item: EndpointProgrammeRequest, authori
     }, _agent_token())
     session = sessions.start_library(endpoint_id, media, position_seconds=item.position_seconds,
                                      plan={'mode':'direct','gapless':True,'tracks':len(media)})
+    for media_id in item.media_ids:
+        catalog.log_play(None if _user.get('master') else _user.get('id'),endpoint_id,media_id,'library',None,{'programme':True,'device':item.device})
     return {'ok': True, 'endpoint': endpoint_id, 'plan': session['plan'], 'session': session, 'result': result}
 
 

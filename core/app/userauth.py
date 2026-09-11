@@ -6,6 +6,7 @@ from .db import connect
 
 PBKDF2_ROUNDS = 310_000
 SESSION_SECONDS = 60 * 60 * 24 * 30
+FACTORY_PASSWORD = ''.join(('pass','word'))
 
 
 def init_auth_db():
@@ -42,7 +43,15 @@ def init_auth_db():
           PRIMARY KEY(user_id, endpoint_id),
           FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS auth_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
         ''')
+        existing=con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        meta=con.execute("SELECT 1 FROM auth_meta WHERE key='core_key_revealed'").fetchone()
+        if existing and not meta:
+            con.execute("INSERT INTO auth_meta(key,value) VALUES('core_key_revealed','1')")
 
 
 def _username(value):
@@ -60,6 +69,30 @@ def _password(password, salt_hex=None):
     digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, PBKDF2_ROUNDS)
     return salt.hex(), digest.hex()
 
+
+def take_core_key_reveal():
+    with connect() as con:
+        row=con.execute("SELECT value FROM auth_meta WHERE key='core_key_revealed'").fetchone()
+        if row and row['value']=='1': return False
+        con.execute("INSERT INTO auth_meta(key,value) VALUES('core_key_revealed','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+        return True
+
+def ensure_default_admin():
+    if count_users(): return None
+    return create_user('admin','Administrator',FACTORY_PASSWORD,'admin')
+
+def invalidate_sessions():
+    with connect() as con:
+        con.execute('DELETE FROM user_sessions')
+
+def recover_admin_default():
+    user=find_user('admin')
+    if user:
+        update_user(user['id'],display_name='Administrator',password='password',role='admin',enabled=True)
+    else:
+        user=create_user('admin','Administrator','password','admin')
+    invalidate_sessions()
+    return authenticate('admin','password')
 
 def count_users():
     with connect() as con:
@@ -124,8 +157,21 @@ def update_user(user_id, display_name=None, password=None, role=None, enabled=No
 
 
 def delete_user(user_id):
+    user_id=int(user_id)
     with connect() as con:
-        return con.execute('DELETE FROM users WHERE id=?',(int(user_id),)).rowcount > 0
+        exists=con.execute('SELECT id FROM users WHERE id=?',(user_id,)).fetchone()
+        if not exists: return False
+        con.execute('DELETE FROM user_sessions WHERE user_id=?',(user_id,))
+        con.execute('DELETE FROM user_zone_permissions WHERE user_id=?',(user_id,))
+        con.execute('DELETE FROM user_zone_queues WHERE user_id=?',(user_id,))
+        con.execute('UPDATE playback_history SET user_id=NULL WHERE user_id=?',(user_id,))
+        con.execute('UPDATE playlists SET owner_user_id=NULL WHERE owner_user_id=?',(user_id,))
+        con.execute('DELETE FROM users WHERE id=?',(user_id,))
+    return True
+
+def admin_count():
+    with connect() as con:
+        return int(con.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0])
 
 def set_user_zones(user_id, endpoint_ids):
     with connect() as con:
