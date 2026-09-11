@@ -1,14 +1,16 @@
 import hmac
+import json
 import os
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import engine, jobs
+from . import engine, jobs, recordings
 from .webui import html
 
 TOKEN=os.getenv('SURROUNDCORE_TOKEN','')
@@ -43,7 +45,7 @@ def capabilities(authorization: str|None=Header(default=None)):
     require_token(authorization)
     return {'audio_only':True,'auto_rip':jobs.AUTO_RIP,'auto_netmd':jobs.AUTO_NETMD,
             'eject_after_success':jobs.AUTO_EJECT,'makemkv':engine.makemkv_available(),
-            'netmd_helper':engine.netmd_available(),'formats':['audio_cd','dvd_video_audio','dvd_audio','bluray','iso','bin_cue','netmd'],
+            'netmd_helper':engine.netmd_available(),'formats':['audio_cd','dvd_video_audio','dvd_audio','bluray','iso','bin_cue','netmd','endpoint_recording'],
             'output':'verified FLAC at source sample rate/channel layout'}
 
 @app.get('/api/v1/ingest/devices')
@@ -82,6 +84,41 @@ def rip_md(authorization: str|None=Header(default=None)):
     if not status.get('available'): raise HTTPException(409,status.get('reason') or 'No NetMD device')
     job=jobs.enqueue('netmd','netmd',status.get('disc_title') or 'MiniDisc',status.get('fingerprint',''),force=True)
     return {'queued':bool(job),'job':job}
+
+@app.post('/api/v1/ingest/recording')
+async def ingest_recording(manifest:str=Form(...),files:list[UploadFile]=File(...),authorization: str|None=Header(default=None)):
+    require_token(authorization)
+    try:
+        meta=json.loads(manifest)
+        if not isinstance(meta,dict): raise ValueError('manifest must be an object')
+    except Exception as exc:
+        raise HTTPException(400,f'Invalid recording manifest: {exc}')
+    stage=jobs.UPLOADS / ('recording-' + uuid.uuid4().hex[:12])
+    stage.mkdir(parents=True,exist_ok=False)
+    saved=[]; max_bytes=int(MAX_UPLOAD_GB*1024**3) if MAX_UPLOAD_GB>0 else 0
+    try:
+        for incoming in files:
+            base=Path(incoming.filename or '').name
+            ext=Path(base).suffix.lower()
+            if ext not in ('.flac','.wav'): raise HTTPException(400,'Endpoint recordings must be FLAC or WAV')
+            name=engine.safe_name(Path(base).stem,'track')+ext; dst=stage/name; size=0
+            with dst.open('wb') as out:
+                while True:
+                    chunk=await incoming.read(4*1024*1024)
+                    if not chunk: break
+                    size+=len(chunk)
+                    if max_bytes and size>max_bytes: raise HTTPException(413,'Upload exceeds configured size limit')
+                    out.write(chunk)
+            await incoming.close(); saved.append(dst)
+        result=recordings.import_recording(saved,meta)
+        try: sync=engine.notify_core()
+        except Exception as exc: sync={'ok':False,'error':str(exc)}
+        return {'ok':True,'result':result,'core_sync':sync}
+    finally:
+        for incoming in files:
+            try: await incoming.close()
+            except Exception: pass
+        shutil.rmtree(stage,ignore_errors=True)
 
 
 def safe_upload_name(name):
