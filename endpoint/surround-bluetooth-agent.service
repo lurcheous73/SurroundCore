@@ -1,0 +1,14 @@
+[Unit]
+Description=SurroundCore Bluetooth / BlueALSA endpoint agent
+After=network-online.target bluetooth.service bluealsa.service
+Wants=network-online.target bluetooth.service bluealsa.service
+
+[Service]
+EnvironmentFile=/etc/surroundcore/bluetooth-agent.env
+ExecStart=/usr/local/lib/surroundcore/surround-bluetooth-agent.py
+Restart=on-failure
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
