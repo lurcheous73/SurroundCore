@@ -22,7 +22,8 @@ class Edition:
     channel_layout: str
     sample_rate: int
     bit_depth: Optional[int]
-    duration: float
+    bitrate: Optional[int] = None
+    duration: float = 0.0
     metadata: Optional[dict] = None
 
     def dict(self):

@@ -20,6 +20,7 @@ services:
       SURROUNDCORE_AIRPLAY_BIND_IP: ${SURROUNDCORE_AIRPLAY_BIND_IP:-}
       SURROUNDCORE_STORAGE_URL: http://127.0.0.1:8084
       SURROUNDCORE_MERIDIAN_URL: http://127.0.0.1:8091
+      SURROUNDCORE_HARDWARE_URL: ${SURROUNDCORE_HARDWARE_URL:-}
     volumes:
       - ${SURROUNDCORE_MEDIA:-/srv/surroundcore/media}:/media:ro
       - ${SURROUNDCORE_DATA:-/var/lib/surroundcore}:/data

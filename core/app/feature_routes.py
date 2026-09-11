@@ -7,6 +7,7 @@ from . import catalog, recordings, userauth, metadata_connectors, output_profile
 router=APIRouter(prefix='/api/v1')
 STORAGE_URL=os.getenv('SURROUNDCORE_STORAGE_URL','http://127.0.0.1:8084').rstrip('/')
 MERIDIAN_URL=os.getenv('SURROUNDCORE_MERIDIAN_URL','http://127.0.0.1:8091').rstrip('/')
+HARDWARE_URL=os.getenv('SURROUNDCORE_HARDWARE_URL','').rstrip('/')
 
 
 def _supplied(authorization):
@@ -38,6 +39,19 @@ def _storage(method,path,payload=None):
     if r.status_code>=400: raise HTTPException(r.status_code,data.get('detail') or data.get('error') or r.text)
     return data
 
+
+def _hardware(path='/v1/hardware'):
+    if not HARDWARE_URL: return {'mode':'unconfigured','storage_modules':[],'devices':[]}
+    token=os.getenv('SURROUNDCORE_TOKEN','')
+    try:
+        with httpx.Client(timeout=8) as client:
+            r=client.get(HARDWARE_URL+path,headers={'Authorization':'Bearer '+token})
+    except Exception as exc:
+        raise HTTPException(502,f'Hardware helper unavailable: {exc}')
+    try: data=r.json()
+    except Exception: data={'detail':r.text}
+    if r.status_code>=400: raise HTTPException(r.status_code,data.get('detail') or r.text)
+    return data
 
 def _register_library_target(item,payload):
     if str((payload or {}).get('use') or 'library')!='library' or not item.get('path'):
@@ -167,6 +181,11 @@ def output_profile_list(authorization:str|None=Header(default=None)):
 def output_profile_save(profile_key:str,item:OutputProfileInput,authorization:str|None=Header(default=None)):
     _admin(authorization)
     return {'ok':True,'profile':output_profiles.save_profile(profile_key,item.name,item.transport,item.settings)}
+
+
+@router.get('/hardware')
+def hardware_inventory(authorization:str|None=Header(default=None)):
+    _admin(authorization); return _hardware()
 
 @router.get('/storage/devices')
 def storage_devices(authorization:str|None=Header(default=None)):

@@ -188,7 +188,7 @@ def album_catalog():
             for e in con.execute('SELECT * FROM editions WHERE album_id=? ORDER BY title COLLATE NOCASE',(item['id'],)):
                 ed=dict(e);ed['metadata']=json.loads(ed.pop('metadata_json') or '{}')
                 ed['tracks']=[]
-                for x in con.execute('SELECT id,path,codec,channels,sample_rate,bit_depth,origin,source_identifier,source_serial,content_hash,export_blocked,metadata_json FROM media WHERE edition_id=? ORDER BY path',(ed['id'],)):
+                for x in con.execute('SELECT id,path,codec,channels,sample_rate,bit_depth,bitrate,origin,source_identifier,source_serial,content_hash,export_blocked,metadata_json FROM media WHERE edition_id=? ORDER BY path',(ed['id'],)):
                     tr=dict(x); tr['metadata']=json.loads(tr.pop('metadata_json') or '{}'); ed['tracks'].append(tr)
                 item['editions'].append(ed)
             albums.append(item)

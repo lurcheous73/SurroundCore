@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import hmac, json, os, re, signal, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 TOKEN=os.getenv('SURROUNDCORE_TOKEN','')
 CORE_URL=os.getenv('SURROUNDCORE_CORE_URL','http://127.0.0.1:8080').rstrip('/')
@@ -39,6 +40,108 @@ def parse_info(mac):
     text=' '.join(uuids).lower()
     data['audio_sink']=('audio sink' in text or '0000110b-' in text)
     return data
+
+def _flatten_block(nodes, out=None):
+    out = out or []
+    for node in nodes or []:
+        out.append(node); _flatten_block(node.get("children") or [], out)
+    return out
+
+def _top_disk(rows, name):
+    by_name={str(x.get("name")):x for x in rows}; cur=by_name.get(str(name)); seen=set()
+    while cur and cur.get("pkname") and cur.get("pkname") not in seen:
+        seen.add(str(cur.get("name"))); cur=by_name.get(str(cur.get("pkname"))) or cur
+        if str(cur.get("type"))=="disk": return cur
+    return cur if cur and str(cur.get("type"))=="disk" else None
+
+def _size_label(value):
+    try: n=int(value or 0)
+    except Exception: n=0
+    if n >= 10**12: return f"{round(n/10**12):.0f} TB"
+    if n >= 10**9: return f"{round(n/10**9):.0f} GB"
+    return ""
+def _clean_model(value):
+    text=re.sub(r"\s+"," ",str(value or "").strip())
+    text=re.sub(r"\b(SSD|NVME|NVM EXPRESS)\b","",text,flags=re.I)
+    return re.sub(r"\s+"," ",text).strip()
+
+def storage_modules():
+    rc,out,_=run("lsblk","-J","-b","-o","NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS,PKNAME,FSTYPE")
+    if rc: return []
+    try: data=json.loads(out)
+    except Exception: return []
+    rows=_flatten_block(data.get("blockdevices") or []); root=None
+    for row in rows:
+        if "/" in (row.get("mountpoints") or []): root=_top_disk(rows,row.get("name")); break
+    root_name=str((root or {}).get("name") or "")
+    nvmes=[x for x in rows if x.get("type")=="disk" and str(x.get("name") or "").startswith("nvme") and x.get("name")!=root_name]
+    def pci_key(row):
+        link=os.path.realpath(f"/sys/block/{row['name']}/device")
+        m=re.findall(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]",link)
+        return m[-1] if m else link
+    nvmes.sort(key=pci_key); active=set(); rc,zout,_=run("zpool","status","-P")
+    if rc==0:
+        for row in nvmes:
+            serial=str(row.get("serial") or "")
+            if serial and serial in zout: active.add(str(row.get("name")))
+    modules=[]
+    for idx,row in enumerate(nvmes):
+        modules.append({"slot":idx,"label":f"Storage module {idx}","present":True,
+          "name":_clean_model(row.get("model")) or "NVMe drive","size":_size_label(row.get("size")),
+          "in_use":str(row.get("name")) in active or bool(row.get("mountpoints")),"type":"nvme"})
+    try: product=open("/sys/class/dmi/id/product_name").read().strip()
+    except Exception: product=""
+    expected=3 if product.upper()=="N5" else len(modules)
+    for idx in range(len(modules),expected):
+        modules.append({"slot":idx,"label":f"Storage module {idx}","present":False,"name":None,"size":None,"in_use":False,"type":"nvme"})
+    return modules
+
+def useful_usb_devices():
+    rc,out,_=run("lsusb"); items=[]
+    if rc:return items
+    skip=("Linux Foundation","Genesys Logic","ASMedia Technology","JMicron Technology","Realtek Semiconductor")
+    for line in out.splitlines():
+        m=re.match(r"Bus \d+ Device \d+: ID ([0-9a-fA-F]{4}):([0-9a-fA-F]{4}) (.+)$",line.strip())
+        if not m: continue
+        vid,pid,desc=m.group(1).lower(),m.group(2).lower(),m.group(3).strip()
+        if (vid,pid)==('2357','0604'): desc='TP-Link UB500'
+        if any(x in desc for x in skip): continue
+        low=desc.lower(); kind="USB device"
+        if "bluetooth" in low or "ub500" in low: kind="Bluetooth adapter"
+        elif any(x in low for x in ("audio","silicon gs3","dac")): kind="USB audio"
+        elif any(x in low for x in ("dvd","blu-ray","cd-rom","optical")): kind="Optical drive"
+        items.append({"name":desc,"type":kind,"present":True})
+    return items
+def ct_storage_modules():
+    ctid=str(os.getenv("SURROUNDCORE_CTID") or "").strip()
+    if not ctid: return []
+    conf=Path(f"/etc/pve/lxc/{ctid}.conf")
+    if not conf.is_file(): return []
+    modules=[]
+    for raw in conf.read_text(errors="replace").splitlines():
+        line=raw.strip()
+        m=re.match(r"^mp(\d+):\s*([^,]+),mp=([^,]+)",line)
+        if m:
+            source,target=m.group(2).strip(),m.group(3).strip()
+            name=Path(target).name.replace("-"," ").replace("_"," ").strip() or f"Storage module {len(modules)}"
+            modules.append({"slot":len(modules),"label":f"Storage module {len(modules)}","present":True,
+              "name":name.title(),"size":None,"in_use":True,"type":"bind","mount":target})
+            continue
+        m=re.match(r"^dev(\d+):\s*path=([^,]+)",line)
+        if not m: continue
+        path=m.group(2).strip()
+        if not re.match(r"^/dev/(nvme|sd)[A-Za-z0-9._/-]+$",path): continue
+        if any(x in path for x in ("/sr","/sg","/bus/usb/","/snd/","/dri/")): continue
+        modules.append({"slot":len(modules),"label":f"Storage module {len(modules)}","present":True,
+          "name":"Presented disk","size":None,"in_use":False,"type":"disk"})
+    return modules
+
+def hardware_inventory():
+    ct_modules=ct_storage_modules()
+    mode='ct' if os.getenv('SURROUNDCORE_CTID','').strip() else 'bare-metal'
+    modules=ct_modules if mode=='ct' else storage_modules()
+    return {"mode":mode,"storage_modules":[{k:v for k,v in x.items() if k!='mount'} for x in modules],
+            "devices":useful_usb_devices()}
 
 def paired_devices():
     rc,out,_=bt('devices','Paired')
@@ -137,6 +240,8 @@ class Handler(BaseHTTPRequestHandler):
         if not authorized(self): return self.send_json(401,{'detail':'unauthorised'})
         if self.path.startswith('/v1/status'):
             return self.send_json(200,{'ok':True,'controller':bt('show')[1],'devices':paired_devices(),'playing':DECODER is not None and DECODER.poll() is None,'active_device':ACTIVE_DEVICE})
+        if self.path.startswith('/v1/hardware'):
+            return self.send_json(200,hardware_inventory())
         return self.send_json(404,{'detail':'not found'})
     def do_POST(self):
         if not authorized(self): return self.send_json(401,{'detail':'unauthorised'})

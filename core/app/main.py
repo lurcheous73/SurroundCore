@@ -351,6 +351,11 @@ def _require_zone(endpoint_id, authorization=None, token=None):
     parent = _zone_parent_id(endpoint_id)
     if user.get('role') != 'admin' and not (userauth.zone_allowed(user, endpoint_id) or userauth.zone_allowed(user, parent)):
         raise HTTPException(403, 'This user is not allowed to control that zone')
+    zone=next((z for z in _logical_zones(user) if z.get('id')==endpoint_id or z.get('endpoint_id')==endpoint_id),None)
+    if zone and zone.get('enabled') is False:
+        raise HTTPException(409, 'This zone is disabled')
+    if zone and zone.get('hardware_present') is False:
+        raise HTTPException(409, 'Required zone hardware is not present')
     return user, supplied
 
 
@@ -400,16 +405,23 @@ def _logical_zones(user):
                 device=dev.get('raw_alsa') or dev.get('alsa') or f'device-{i}'
                 zone_id=f"{endpoint['id']}::{device}"
                 profile=output_profiles.get_profile(zone_id)
+                settings=dict(profile.get('settings') or {})
+                enabled=bool(settings.get('enabled',True))
+                hardware_present=bool(dev.get('hardware_present',True))
                 name=profile.get('name') or _local_zone_name(dev,i)
                 zones.append({'id':zone_id,'endpoint_id':endpoint['id'],'device':device,'name':name,
                     'address':'local','kind':'alsa','transports':['alsa'],'transport_options':[protocols.describe('alsa')],
-                    'transport_preference':'alsa','transport_key':zone_id,'playable':bool(endpoint.get('address')),
+                    'transport_preference':'alsa','transport_key':zone_id,
+                    'playable':bool(endpoint.get('address')) and enabled and hardware_present,
+                    'enabled':enabled,'hardware_present':hardware_present,
                     'local':True,'physical_device':dict(dev),'endpoints':[endpoint]})
             continue
         host=_endpoint_host(endpoint); name=str(endpoint.get('name') or endpoint.get('id') or 'Zone'); base=name.removesuffix(' (L)').removesuffix(' (R)')
         key=host or base.casefold(); groups.setdefault(key,{'name':base,'host':host,'key':key,'endpoints':[]})['endpoints'].append(endpoint)
     for group in groups.values():
         profile=output_profiles.get_profile(group['key'])
+        settings=dict(profile.get('settings') or {})
+        enabled=bool(settings.get('enabled',True))
         wanted=profile.get('transport') or prefs.get(group['key'])
         if profile.get('name'): group['name']=profile['name']
         eps=sorted(group['endpoints'],key=lambda e:(0 if wanted and e.get('kind')==wanted else 1, protocols.rank(e.get('kind'))))
@@ -420,7 +432,7 @@ def _logical_zones(user):
         playable=preferred.get('kind') in ('alsa','airplay','sonos','upnp','cast','meridian') and not bool(pcaps.get('discovered_only'))
         if preferred.get('kind')=='alsa' and not (pcaps.get('devices') or []): playable=False
         options=[protocols.describe(k) for k in kinds]
-        zones.append({'id':preferred.get('id'),'endpoint_id':preferred.get('id'),'device':'default','name':group['name'],'address':'local' if local else group['host'],'kind':preferred.get('kind'),'transports':kinds,'transport_options':options,'transport_preference':wanted or preferred.get('kind'),'transport_key':group['key'],'playable':playable,'local':local,'endpoints':eps})
+        zones.append({'id':preferred.get('id'),'endpoint_id':preferred.get('id'),'device':'default','name':group['name'],'address':'local' if local else group['host'],'kind':preferred.get('kind'),'transports':kinds,'transport_options':options,'transport_preference':wanted or preferred.get('kind'),'transport_key':group['key'],'playable':playable and enabled,'enabled':enabled,'hardware_present':True,'local':local,'endpoints':eps})
     return sorted(zones,key=lambda z:z['name'].casefold())
 
 

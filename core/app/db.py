@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS media (
   channel_layout TEXT,
   sample_rate INTEGER,
   bit_depth INTEGER,
+  bitrate INTEGER,
   duration REAL,
   metadata_json TEXT NOT NULL DEFAULT '{}'
 );
@@ -72,18 +73,20 @@ def init_db():
         cols={r['name'] for r in con.execute('PRAGMA table_info(media)')}
         if 'source_id' not in cols:
             con.execute('ALTER TABLE media ADD COLUMN source_id TEXT')
+        if 'bitrate' not in cols:
+            con.execute('ALTER TABLE media ADD COLUMN bitrate INTEGER')
 
 def upsert_media(item):
     values=(item['path'], item.get('codec'), item.get('channels'), item.get('channel_layout'),
-            item.get('sample_rate'), item.get('bit_depth'), item.get('duration'),
+            item.get('sample_rate'), item.get('bit_depth'), item.get('bitrate'), item.get('duration'),
             json.dumps(item.get('metadata') or {}), item.get('source_id'))
     with connect() as con:
-        con.execute('''INSERT INTO media(path,codec,channels,channel_layout,sample_rate,bit_depth,duration,metadata_json,source_id)
-        VALUES(?,?,?,?,?,?,?,?,?)
+        con.execute('''INSERT INTO media(path,codec,channels,channel_layout,sample_rate,bit_depth,bitrate,duration,metadata_json,source_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(path) DO UPDATE SET
           codec=excluded.codec, channels=excluded.channels,
           channel_layout=excluded.channel_layout, sample_rate=excluded.sample_rate,
-          bit_depth=excluded.bit_depth, duration=excluded.duration,
+          bit_depth=excluded.bit_depth, bitrate=excluded.bitrate, duration=excluded.duration,
           metadata_json=excluded.metadata_json, source_id=excluded.source_id''', values)
 
 def _media_row(row):
