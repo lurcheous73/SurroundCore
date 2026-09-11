@@ -2,7 +2,7 @@ import hashlib, hmac, os
 import httpx
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from . import catalog, recordings, userauth, metadata_connectors, output_profiles
+from . import catalog, recordings, userauth, metadata_connectors, metadata_settings, output_profiles
 
 router=APIRouter(prefix='/api/v1')
 STORAGE_URL=os.getenv('SURROUNDCORE_STORAGE_URL','http://127.0.0.1:8084').rstrip('/')
@@ -83,13 +83,18 @@ class RadioRecordInput(BaseModel):
     station:dict; cassette_type:str='I'
 
 class CaptureInput(BaseModel):
-    device:str; media_type:str='album'; name:str='Untitled'; sample_rate:int=96000; bit_depth:int=24
+    device:str; media_type:str='album'; name:str='Untitled'; sample_rate:int=96000; bit_depth:int=24; input_role:str='line'
 
 class ImportRecordingInput(BaseModel):
     path:str; media_type:str='album'; name:str|None=None; origin:str='usb_import'; export_blocked:bool=False
 
 class OutputProfileInput(BaseModel):
     name:str|None=None; transport:str|None=None; settings:dict|None=None
+
+class MetadataProviderInput(BaseModel):
+    enabled:bool|None=None
+    secret:str|None=None
+    clear_secret:bool=False
 
 class MediaExportInput(BaseModel):
     target_id:str
@@ -118,6 +123,23 @@ def playlist_save(item:PlaylistInput,authorization:str|None=Header(default=None)
 def metadata_providers(authorization:str|None=Header(default=None)):
     _user(authorization); return {'providers':metadata_connectors.catalog()}
 
+@router.get('/metadata/settings')
+def metadata_settings_get(authorization:str|None=Header(default=None)):
+    _admin(authorization); return metadata_settings.public_settings()
+
+@router.put('/metadata/settings/{provider_id}')
+def metadata_settings_put(provider_id:str,item:MetadataProviderInput,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    try: return {'ok':True,'provider':metadata_settings.configure(provider_id,item.enabled,item.secret,item.clear_secret)}
+    except ValueError as exc: raise HTTPException(400,str(exc))
+
+@router.get('/metadata/artwork-candidates')
+def metadata_artwork_candidates(artist:str='',album:str='',limit:int=20,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    try: return metadata_connectors.artwork_candidates(artist,album,limit)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    except Exception as exc: raise HTTPException(502,f'Artwork lookup failed: {exc}')
+
 @router.get('/metadata/candidates')
 def metadata_candidates(artist:str,album:str,tracks:str='',limit:int=12,authorization:str|None=Header(default=None)):
     _user(authorization)
@@ -125,6 +147,13 @@ def metadata_candidates(artist:str,album:str,tracks:str='',limit:int=12,authoriz
     try: return metadata_connectors.candidate_search(artist,album,titles,limit)
     except ValueError as exc: raise HTTPException(400,str(exc))
     except Exception as exc: raise HTTPException(502,f'Metadata lookup failed: {exc}')
+
+@router.get('/metadata/disc-candidates')
+def metadata_disc_candidates(toc:str,limit:int=12,authorization:str|None=Header(default=None)):
+    _user(authorization)
+    try: return metadata_connectors.candidate_search_toc(toc,limit)
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    except Exception as exc: raise HTTPException(502,f'Disc metadata lookup failed: {exc}')
 
 @router.get('/metadata/{provider_id}/search')
 def metadata_search(provider_id:str,q:str='',artist:str|None=None,album:str|None=None,track:str|None=None,limit:int=20,authorization:str|None=Header(default=None)):
@@ -166,7 +195,7 @@ def recording_radio_start(item:RadioRecordInput,authorization:str|None=Header(de
 @router.post('/recordings/capture/start')
 def recording_capture_start(item:CaptureInput,authorization:str|None=Header(default=None)):
     _admin(authorization)
-    try: return recordings.start_capture(item.device,item.media_type,item.name,item.sample_rate,item.bit_depth)
+    try: return recordings.start_capture(item.device,item.media_type,item.name,item.sample_rate,item.bit_depth,item.input_role)
     except Exception as exc: raise HTTPException(502,str(exc))
 
 @router.post('/recordings/{recording_id}/stop')

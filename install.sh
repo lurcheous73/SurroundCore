@@ -21,11 +21,11 @@ systemctl enable --now docker
 grep -q '^user_allow_other$' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
 
 install -d -m 0755 /opt/surroundcore /var/lib/surroundcore /usr/local/lib/surroundcore \
-  /srv/surroundcore/sources /srv/surroundcore/sources/ingest /var/cache/surroundcore /var/lib/surroundcore/ingest /opt/surroundcore/makemkv /opt/surroundcore/spotify
+  /srv/surroundcore/sources /srv/surroundcore/sources/ingest /srv/surroundcore/backup /var/cache/surroundcore /var/lib/surroundcore/ingest /opt/surroundcore/makemkv /opt/surroundcore/spotify /opt/surroundcore/meridian-vendor
 if [ ! -d /srv/surroundcore/media ]; then
   install -d -m 0755 /srv/surroundcore/media
 fi
-cp -a core ingest storage controlmac-ingest docker-compose.yml .env.example /opt/surroundcore/
+cp -a core ingest storage controlmac-ingest meridian remote-agent docker-compose.yml .env.example /opt/surroundcore/
 cp endpoint/surround-agent.py /usr/local/lib/surroundcore/
 cp endpoint/surround-agent.service /etc/systemd/system/
 chmod 0755 /usr/local/lib/surroundcore/surround-agent.py

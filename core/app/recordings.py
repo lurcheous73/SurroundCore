@@ -45,14 +45,14 @@ def start_radio(station,cassette='I',engine='auto'):
     with _LOCK:_SESSIONS[rid]={'process':proc,'data':data}
     return data
 
-def start_capture(device,media_type='album',name='Untitled',sample_rate=96000,bit_depth=24):
+def start_capture(device,media_type='album',name='Untitled',sample_rate=96000,bit_depth=24,input_role='line'):
     if media_type not in CAPTURE_TYPES: raise ValueError('unknown capture type')
     stamp=datetime.now().strftime('%Y-%m-%d_%H-%M-%S');folder=ROOT/'records'/_safe(media_type);folder.mkdir(parents=True,exist_ok=True)
     out=folder/f'{_safe(name)}_{stamp}.flac';fmt='s16' if int(bit_depth)<=16 else 's32'
     proc=_spawn_ffmpeg(device,out,['-c:a','flac','-sample_fmt',fmt,'-ar',str(int(sample_rate))],['-f','alsa'])
     rid='rec-'+uuid.uuid4().hex[:16]
     data={'id':rid,'kind':'capture','media_type':media_type,'name':name,'device':device,'path':str(out),
-          'sample_rate':int(sample_rate),'bit_depth':int(bit_depth),'started_at':time.time(),'export_blocked':False,'state':'recording'}
+          'sample_rate':int(sample_rate),'bit_depth':int(bit_depth),'input_role':input_role,'started_at':time.time(),'export_blocked':False,'state':'recording'}
     _manifest(out,data)
     with _LOCK:_SESSIONS[rid]={'process':proc,'data':data}
     return data
@@ -141,13 +141,67 @@ def recordings(kind=None):
 def cassette_profiles():
     return [{'id':k,**{x:v for x,v in p.items() if x!='args'}} for k,p in CASSETTES.items()]
 
+DEVICE_FAMILIES=[
+ (('SOUND BLASTER','CREATIVE'),'Creative Sound Blaster'),(('RME','FIREFACE','BABYFACE'),'RME Audio'),
+ (('FOCUSRITE','SCARLETT','CLARETT'),'Focusrite'),(('MOTU',),'MOTU'),(('TOPPING',),'Topping'),
+ (('S.M.S.L','SMSL'),'SMSL'),(('IFI AUDIO','IFI '),'iFi Audio'),(('FIIO',),'FiiO'),
+ (('CHORD',),'Chord Electronics'),(('SCHIIT',),'Schiit Audio'),(('CAMBRIDGE AUDIO',),'Cambridge Audio'),
+ (('BENCHMARK',),'Benchmark Media'),(('MINIDSP',),'miniDSP'),(('PRESONUS',),'PreSonus'),
+ (('BEHRINGER',),'Behringer'),(('STEINBERG',),'Steinberg'),(('UNIVERSAL AUDIO',),'Universal Audio'),
+ (('DENON',),'Denon'),(('MARANTZ',),'Marantz'),(('YAMAHA',),'Yamaha'),(('NAD',),'NAD'),
+ (('ROTEL',),'Rotel'),(('ARCAM',),'Arcam')]
+
+def _device_family(text):
+    upper=str(text or '').upper()
+    for needles,name in DEVICE_FAMILIES:
+        if any(n in upper for n in needles): return name
+    return 'USB Audio Class' if 'USB' in upper else 'Built-in / Generic Audio'
+
+def _capture_pcm_caps(card):
+    path=Path(f'/proc/asound/card{card}/stream0')
+    if not path.is_file(): return {'max_channels':None,'sample_rates':[],'bit_depths':[],'sample_formats':[],'capability_source':'unknown'}
+    try: text=path.read_text(errors='replace')
+    except OSError: text=''
+    import re
+    rates,bits,channels,formats=set(),set(),[],set(); in_capture=False
+    for raw in text.splitlines():
+        line=raw.strip()
+        if line.endswith('Playback:') or line=='Playback:': in_capture=False; continue
+        if line.endswith('Capture:') or line=='Capture:': in_capture=True; continue
+        if not in_capture: continue
+        if line.startswith('Channels:'):
+            channels += [int(x) for x in re.findall(r'\b\d+\b',line.split(':',1)[1])]
+        elif line.startswith('Rates:'):
+            rates.update(int(x) for x in re.findall(r'\b\d+\b',line.split(':',1)[1]) if 8000<=int(x)<=768000)
+        elif line.startswith('Format:') or line.startswith('Formats:'):
+            fm=line.split(':',1)[1].upper(); formats.update(x.strip() for x in fm.replace(',',' ').split() if x.strip())
+            for b in (8,16,20,24,32,64):
+                if str(b) in fm: bits.add(b)
+    return {'max_channels':max(channels) if channels else None,'sample_rates':sorted(rates),'bit_depths':sorted(bits),
+            'sample_formats':sorted(formats),'capability_source':'usb-audio-descriptor' if rates or channels or bits or formats else 'unknown'}
+
 def capture_devices():
+    import re
     devices=[]
     try:
-        p=subprocess.run(['arecord','-L'],capture_output=True,text=True,timeout=5)
+        p=subprocess.run(['arecord','-l'],capture_output=True,text=True,timeout=5)
         for raw in p.stdout.splitlines():
-            if raw and not raw[0].isspace() and raw not in ('null','default','sysdefault'):
-                devices.append({'id':raw.strip(),'name':raw.strip(),'backend':'alsa'})
+            m=re.match(r'^card\s+(\d+):\s*([^,]+),\s*device\s+(\d+):\s*(.*)$',raw.strip())
+            if not m: continue
+            card,device=int(m.group(1)),int(m.group(3)); card_desc=m.group(2).strip(); dev_desc=m.group(4).strip()
+            description=f'{card_desc} · {dev_desc}'; upper=description.upper()
+            input_type='usb-audio' if 'USB' in upper else ('digital' if any(x in upper for x in ('S/PDIF','SPDIF','IEC958','AES')) else 'analog')
+            caps=_capture_pcm_caps(card)
+            card_id=''
+            try: card_id=Path(f'/proc/asound/card{card}/id').read_text().strip()
+            except OSError: pass
+            usb_id=''
+            try: usb_id=Path(f'/proc/asound/card{card}/usbid').read_text().strip()
+            except OSError: pass
+            devices.append({'id':f'plughw:{card},{device}','raw_alsa':f'hw:{card},{device}','name':card_desc,
+              'description':description,'backend':'alsa','device_family':_device_family(description),'input_type':input_type,
+              'card_index':card,'device_index':device,'card_id':card_id,'usb_id':usb_id,
+              'multichannel_candidate':bool((caps.get('max_channels') or 0)>2),**caps})
     except Exception: pass
     return devices
 

@@ -14,7 +14,7 @@ See [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) for the project promise.
 
 SurroundCore is a Debian 13-only multichannel music core and endpoint system intended to sit alongside Meridian/Sooloos and be controlled by modern clients such as ControlMac 2026.
 
-Current status: **v0.5 development / developer preview**. Storage, synchronized playback, optical ingest and streaming providers are being developed as one system.
+Current baseline: **v0.001**. This is the first locked Brimstone/SurroundCore appliance baseline: goth-purple ControlMac-style UI, local SQLite catalogue, explicit Sooloos snapshot behaviour, modern endpoint control, recording, ingest and provider plumbing.
 
 ## Goals
 

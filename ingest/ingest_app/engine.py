@@ -147,7 +147,14 @@ def audio_cd_info(device):
         d=run(['cd-discid',device],timeout=10)
         if d.returncode==0 and d.stdout.split(): discid=d.stdout.split()[0]
     tracks=len(re.findall(r'^\s*\d+\.',text,re.M))
-    return {'kind':'audio_cd','fingerprint':discid or hashlib.sha256(text.encode()).hexdigest()[:24],'tracks':tracks}
+    toc=''
+    if tool('cd-discid'):
+        mb=run(['cd-discid','--musicbrainz',device],timeout=10)
+        if mb.returncode==0:
+            candidate=' '.join((mb.stdout or '').split())
+            if candidate and all(x.isdigit() for x in candidate.split()): toc=candidate
+    return {'kind':'audio_cd','fingerprint':discid or hashlib.sha256(text.encode()).hexdigest()[:24],
+            'tracks':tracks,'musicbrainz_toc':toc}
 
 
 def optical_media_info(device):
@@ -321,24 +328,42 @@ def write_manifest(outdir, data):
     return path
 
 
-def rip_audio_cd(device, label=None, fingerprint=''):
-    outdir = album_dir(label or 'Audio CD', fingerprint)
+def rip_audio_cd(device, label=None, fingerprint='', metadata=None):
+    metadata=dict(metadata or {})
+    artist=str(metadata.get('artist') or '').strip()
+    album=str(metadata.get('title') or label or 'Audio CD').strip() or 'Audio CD'
+    folder_label=(' - '.join(x for x in (artist,album) if x)) or album
+    outdir = album_dir(folder_label, fingerprint)
     work = Path(tempfile.mkdtemp(prefix='cdda-', dir=str(INGEST_ROOT / 'work')))
     outputs = []
+    titles=list(metadata.get('tracks') or [])
     try:
         p = run(['cd-paranoia', '-d', device, '-B'], cwd=str(work), timeout=None)
         if p.returncode: raise RuntimeError((p.stderr or p.stdout or 'CD rip failed').strip())
         wavs = sorted(work.glob('*.wav'))
         if not wavs: raise RuntimeError('cd-paranoia produced no audio tracks')
         for n, wav in enumerate(wavs, 1):
-            target = outdir / f'{n:02d} Track {n:02d}.flac'
-            run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(wav),'-map','0:a:0','-vn',
-                 '-c:a','flac','-compression_level','8','-metadata',f'track={n}',str(target)], check=True)
+            title=str(titles[n-1]).strip() if n-1 < len(titles) and str(titles[n-1]).strip() else f'Track {n:02d}'
+            target = outdir / f'{n:02d} {safe_name(title)}.flac'
+            cmd=['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(wav),'-map','0:a:0','-vn',
+                 '-c:a','flac','-compression_level','8','-metadata',f'track={n}',
+                 '-metadata',f'title={title}','-metadata',f'album={album}']
+            if artist: cmd += ['-metadata',f'artist={artist}','-metadata',f'album_artist={artist}']
+            if metadata.get('year'): cmd += ['-metadata',f'date={metadata.get("year")}']
+            cmd.append(str(target)); run(cmd, check=True)
             s = ffprobe_streams(target)
             if not s or s[0]['channels'] != 2 or s[0]['sample_rate'] != 44100:
                 raise RuntimeError(f'CD track {n} verification failed')
-            outputs.append({'path': str(target), 'layout': 'Stereo', 'verified': True})
-        write_manifest(outdir, {'source':'audio_cd','device':device,'fingerprint':fingerprint,'outputs':outputs})
+            outputs.append({'path': str(target), 'layout': 'Stereo', 'verified': True, 'title':title, 'track':n})
+        art=str(metadata.get('artwork_url') or '')
+        if art.startswith('https://coverartarchive.org/release/'):
+            try:
+                import urllib.request
+                req=urllib.request.Request(art,headers={'User-Agent':'SurroundCore/0.5'})
+                with urllib.request.urlopen(req,timeout=20) as r: data=r.read(15*1024*1024+1)
+                if 100 < len(data) <= 15*1024*1024: (outdir/'cover.jpg').write_bytes(data)
+            except Exception: pass
+        write_manifest(outdir, {'source':'audio_cd','device':device,'fingerprint':fingerprint,'metadata':metadata,'outputs':outputs})
         return {'kind':'audio_cd','output_dir':str(outdir),'outputs':outputs}
     except Exception:
         shutil.rmtree(outdir, ignore_errors=True); raise
@@ -485,11 +510,11 @@ def process_bin(bin_path, cue_path=None, label=None):
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-def process_physical(device):
+def process_physical(device, metadata=None):
     identity=media_identity(device)
     if not identity: raise RuntimeError('No readable media in optical drive')
     if identity['kind']=='audio_cd':
-        return rip_audio_cd(device,'Audio CD',identity.get('fingerprint',''))
+        return rip_audio_cd(device,'Audio CD',identity.get('fingerprint',''),metadata)
     if identity['kind'] in ('dvd','bluray'):
         if not makemkv_available(): raise RuntimeError('DVD/Blu-ray requires MakeMKV on this Core')
         label='Blu-ray Disc' if identity['kind']=='bluray' else 'DVD Disc'

@@ -64,12 +64,12 @@ def active_key(kind, source, fingerprint=''):
     return False
 
 
-def enqueue(kind, source, label=None, fingerprint='', force=False):
+def enqueue(kind, source, label=None, fingerprint='', force=False, metadata=None):
     if not force and fingerprint and fingerprint in completed_fingerprints(): return None
     if active_key(kind, source, fingerprint): return None
     job={'id':uuid.uuid4().hex[:12],'kind':kind,'source':source,'label':label or '',
          'fingerprint':fingerprint or '','status':'queued','created':_now(),'updated':_now(),
-         'result':None,'error':'','core_sync':None}
+         'result':None,'error':'','core_sync':None,'metadata':dict(metadata or {})}
     with _lock: _jobs[job['id']]=job; _save()
     _q.put(job['id']); return dict(job)
 
@@ -94,7 +94,7 @@ def _update(job_id, **values):
 def _process_unlocked(job):
     kind, source = job['kind'], job['source']
     if kind == 'physical':
-        result=engine.process_physical(source)
+        result=engine.process_physical(source,job.get('metadata') or {})
         if AUTO_EJECT: engine.eject(source)
         return result
     if kind == 'netmd': return engine.rip_netmd()

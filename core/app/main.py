@@ -43,7 +43,7 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
 from .groups import GroupPlayback
 from . import sessions, airplay, userauth, artwork, radio_browser, meridian_discovery, cast_driver, protocols, catalog, output_profiles, transport
 
-app = FastAPI(title='SurroundCore', version='0.5.0-dev')
+app = FastAPI(title='SurroundCore', version='0.001')
 app.include_router(feature_router)
 app.include_router(controlmac_upload_router)
 
@@ -313,7 +313,7 @@ def shutdown():
 
 @app.get('/api/v1/health')
 def health():
-    return {'ok': True, 'service': 'SurroundCore', 'version': '0.5.0-dev'}
+    return {'ok': True, 'service': 'SurroundCore', 'version': '0.001'}
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -618,10 +618,10 @@ def my_queue_remove(endpoint_id: str, index: int, authorization: str | None = He
 INGEST_URL = os.getenv('SURROUNDCORE_INGEST_URL', 'http://127.0.0.1:8082').rstrip('/')
 
 
-@app.api_route('/api/v1/ingest/{ingest_path:path}', methods=['GET', 'POST', 'DELETE'])
+@app.api_route('/api/v1/ingest/{ingest_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
 async def ingest_proxy(ingest_path: str, request: Request, authorization: str | None = Header(default=None)):
     _admin, token = _require_admin(authorization)
-    body = await request.body()
+    body = None if request.method == 'PUT' else await request.body()
     headers = {'Authorization': f'Bearer {token}'}
     content_type = request.headers.get('content-type')
     if content_type:
@@ -630,7 +630,8 @@ async def ingest_proxy(ingest_path: str, request: Request, authorization: str | 
         async with httpx.AsyncClient(timeout=180.0) as client:
             upstream = await client.request(
                 request.method, f'{INGEST_URL}/api/v1/ingest/{ingest_path}',
-                params=list(request.query_params.multi_items()), headers=headers, content=body)
+                params=list(request.query_params.multi_items()), headers=headers,
+                content=request.stream() if request.method == 'PUT' else body)
     except httpx.HTTPError as exc:
         raise HTTPException(503, f'Ingest service unavailable: {exc}')
     response_type = (upstream.headers.get('content-type') or 'application/json').split(';', 1)[0]

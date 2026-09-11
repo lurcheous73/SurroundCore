@@ -4,9 +4,9 @@ import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import engine, jobs
 from .webui import html
@@ -21,11 +21,12 @@ async def lifespan(app):
     yield
     jobs.stop()
 
-app=FastAPI(title='SurroundCore Ingest',version='0.5.0-dev',lifespan=lifespan)
+app=FastAPI(title='SurroundCore Ingest',version='0.001',lifespan=lifespan)
 
 class RipRequest(BaseModel):
     device: str
     force: bool=False
+    metadata: dict=Field(default_factory=dict)
 
 
 def require_token(authorization=None):
@@ -33,7 +34,7 @@ def require_token(authorization=None):
     if not TOKEN or not hmac.compare_digest(TOKEN,supplied): raise HTTPException(401,'Invalid SurroundCore token')
 
 @app.get('/api/v1/ingest/health')
-def health(): return {'ok':True,'service':'SurroundCore Ingest','version':'0.5.0-dev'}
+def health(): return {'ok':True,'service':'SurroundCore Ingest','version':'0.001'}
 
 @app.get('/ingest',response_class=HTMLResponse)
 def page(): return HTMLResponse(html())
@@ -90,7 +91,7 @@ def rip(req:RipRequest,authorization: str|None=Header(default=None)):
     require_token(authorization)
     allowed={d['device'] for d in engine.optical_devices()}
     if req.device not in allowed: raise HTTPException(404,'Optical drive not found')
-    job=jobs.enqueue('physical',req.device,req.device,'',force=True)
+    job=jobs.enqueue('physical',req.device,req.device,'',force=True,metadata=req.metadata)
     return {'queued':bool(job),'job':job,'already_completed':job is None}
 
 @app.post('/api/v1/ingest/netmd')
@@ -104,6 +105,37 @@ def safe_upload_name(name):
     base=Path(name or '').name
     if not base or Path(base).suffix.lower() not in ALLOWED: raise HTTPException(400,'Only ISO, BIN and CUE files are accepted')
     return engine.safe_name(Path(base).stem,'upload')+Path(base).suffix.lower()
+
+
+@app.put('/api/v1/ingest/image')
+async def upload_image(request: Request, filename: str, source_kind: str='cd', authorization: str|None=Header(default=None)):
+    require_token(authorization)
+    kind=(source_kind or '').strip().lower()
+    if kind not in ('cd','video'): raise HTTPException(400,'source_kind must be cd or video')
+    name=safe_upload_name(filename)
+    ext=Path(name).suffix.lower()
+    if kind=='video' and ext!='.iso': raise HTTPException(400,'DVD / Blu-ray images must be ISO')
+    if kind=='cd' and ext not in ('.iso','.bin','.cue'): raise HTTPException(400,'CD images must be ISO or BIN/CUE')
+    dst=jobs.UPLOADS/name; tmp=dst.with_suffix(dst.suffix+'.part'); size=0
+    max_bytes=int(MAX_UPLOAD_GB*1024**3) if MAX_UPLOAD_GB>0 else 0
+    try:
+        with tmp.open('wb') as out:
+            async for chunk in request.stream():
+                if not chunk: continue
+                size += len(chunk)
+                if max_bytes and size>max_bytes: raise HTTPException(413,'Upload exceeds configured size limit')
+                out.write(chunk)
+        tmp.replace(dst)
+    except Exception:
+        tmp.unlink(missing_ok=True); raise
+    primary=dst
+    if ext=='.cue': primary=dst.with_suffix('.bin')
+    ready = primary.is_file() and (primary.suffix.lower()!='.bin' or primary.with_suffix('.cue').is_file())
+    job=None
+    if ready:
+        fp=jobs.hash_file_identity(primary)
+        job=jobs.enqueue(primary.suffix.lower().lstrip('.'),str(primary),primary.stem,fp,force=True)
+    return {'ok':True,'saved':dst.name,'bytes':size,'source_kind':kind,'ready':ready,'job':job,'status':'queued' if job else 'waiting_for_pair' if ext in ('.bin','.cue') else 'stored'}
 
 @app.post('/api/v1/ingest/upload')
 async def upload(files:list[UploadFile]=File(...),authorization: str|None=Header(default=None)):
