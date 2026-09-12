@@ -128,6 +128,12 @@ class OutputTransportInput(BaseModel):
     host: str
     transport: str
 
+class ZoneMappingInput(BaseModel):
+    name: str
+    endpoint_id: str
+    device: str = 'default'
+    enabled: bool = True
+
 
 class RadioStationInput(BaseModel):
     name: str
@@ -430,7 +436,9 @@ def _visible_endpoints(user):
     if user.get('role') == 'admin':
         return items
     allowed = set(user.get('zones') or [])
-    return [e for e in items if e.get('id') in allowed]
+    mappings = load_settings().get('zone_mappings') or {}
+    mapped_endpoints = {str(m.get('endpoint_id')) for zid,m in mappings.items() if str(zid) in allowed and m.get('endpoint_id')}
+    return [e for e in items if e.get('id') in allowed or str(e.get('id')) in mapped_endpoints]
 
 
 
@@ -454,7 +462,7 @@ def _local_zone_name(device, index):
     return base + (f' · {label}' if label and label.casefold()!=base.casefold() else '')
 
 
-def _logical_zones(user):
+def _auto_logical_zones(user):
     prefs=load_settings().get('output_transports') or {}
     zones=[]; groups={}
     for endpoint in _visible_endpoints(user):
@@ -492,6 +500,44 @@ def _logical_zones(user):
         options=[protocols.describe(k) for k in kinds]
         zones.append({'id':preferred.get('id'),'endpoint_id':preferred.get('id'),'device':'default','name':group['name'],'address':'local' if local else group['host'],'kind':preferred.get('kind'),'transports':kinds,'transport_options':options,'transport_preference':wanted or preferred.get('kind'),'transport_key':group['key'],'playable':playable and enabled,'enabled':enabled,'hardware_present':True,'local':local,'endpoints':eps})
     return sorted(zones,key=lambda z:z['name'].casefold())
+
+
+def _zone_playable(endpoint, enabled=True):
+    caps=endpoint.get('capabilities') or {}
+    playable=endpoint.get('kind') in ('alsa','airplay','sonos','upnp','cast','meridian') and not bool(caps.get('discovered_only'))
+    if endpoint.get('kind')=='alsa' and not (caps.get('devices') or []): playable=False
+    return bool(playable and enabled)
+
+
+def _logical_zones(user):
+    auto=_auto_logical_zones(user)
+    mappings=load_settings().get('zone_mappings') or {}
+    if not mappings: return auto
+    endpoint_index={str(e.get('id')):e for e in _visible_endpoints(user)}
+    allowed=None if user.get('role')=='admin' else set(user.get('zones') or [])
+    mapped=[]; referenced=set()
+    for zone_id,item in mappings.items():
+        if allowed is not None and str(zone_id) not in allowed: continue
+        endpoint_id=str(item.get('endpoint_id') or '')
+        endpoint=endpoint_index.get(endpoint_id)
+        if not endpoint: continue
+        device=str(item.get('device') or 'default')
+        base=next((z for z in auto if str(z.get('endpoint_id'))==endpoint_id and (device=='default' or str(z.get('device'))==device)),None)
+        if base is None:
+            base=next((z for z in auto if any(str(e.get('id'))==endpoint_id for e in z.get('endpoints') or [])),None)
+        if base is None: continue
+        z=dict(base); enabled=bool(item.get('enabled',True))
+        z.update({'id':str(zone_id),'name':str(item.get('name') or base.get('name') or zone_id),
+                  'endpoint_id':endpoint_id,'device':device or base.get('device') or 'default',
+                  'enabled':enabled,'mapped':True,'mapping_id':str(zone_id),'playable':_zone_playable(endpoint,enabled)})
+        z['kind']=endpoint.get('kind') or z.get('kind'); z['address']='local' if endpoint.get('kind') in ('alsa','meridian') else (_endpoint_host(endpoint) or z.get('address'))
+        z['transport_preference']=endpoint.get('kind') or z.get('transport_preference'); z['transport_key']=str(zone_id)
+        mapped.append(z); referenced.add((endpoint_id,device))
+    for z in auto:
+        key=(str(z.get('endpoint_id')),str(z.get('device') or 'default'))
+        if key in referenced or any(str(e.get('id')) in {x[0] for x in referenced} for e in z.get('endpoints') or []): continue
+        z=dict(z); z['mapped']=False; mapped.append(z)
+    return sorted(mapped,key=lambda z:z['name'].casefold())
 
 
 @app.get('/api/v1/auth/state')
@@ -1592,6 +1638,39 @@ def endpoint_meridian_model(endpoint_id: str, item: MeridianModelInput, authoriz
     save_settings({'meridian_models': models})
     return {'ok': True, 'endpoint_id': endpoint_id, 'model': model}
 
+
+
+@app.get('/api/v1/zone-mappings')
+def zone_mappings(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {'mappings':load_settings().get('zone_mappings') or {},'endpoints':_all_endpoints()}
+
+
+@app.put('/api/v1/zone-mappings/{zone_id}')
+def zone_mapping_save(zone_id: str, item: ZoneMappingInput, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    zone_id=str(zone_id or '').strip()
+    if not zone_id: raise HTTPException(400,'Zone ID is required')
+    endpoints={str(e.get('id')):e for e in _all_endpoints()}
+    if item.endpoint_id not in endpoints: raise HTTPException(404,'Endpoint not found')
+    endpoint=endpoints[item.endpoint_id]
+    device=str(item.device or 'default')
+    if endpoint.get('kind')=='alsa' and device!='default':
+        devices=(endpoint.get('capabilities') or {}).get('devices') or []
+        valid={str(d.get('raw_alsa') or d.get('alsa') or '') for d in devices}
+        if device not in valid: raise HTTPException(400,'Selected output is not available on this endpoint')
+    settings=load_settings(); mappings=dict(settings.get('zone_mappings') or {})
+    mappings[zone_id]={'name':item.name.strip()[:120] or zone_id,'endpoint_id':item.endpoint_id,'device':device,'enabled':bool(item.enabled)}
+    save_settings({'zone_mappings':mappings})
+    return {'ok':True,'zone_id':zone_id,'mapping':mappings[zone_id]}
+
+
+@app.delete('/api/v1/zone-mappings/{zone_id}')
+def zone_mapping_delete(zone_id: str, authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    settings=load_settings(); mappings=dict(settings.get('zone_mappings') or {})
+    removed=mappings.pop(str(zone_id),None); save_settings({'zone_mappings':mappings})
+    return {'ok':True,'removed':removed is not None}
 
 
 @app.get('/api/v1/zones')

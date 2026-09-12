@@ -157,6 +157,7 @@ DEFAULT_SETTINGS = {
     'primary_library_node': None,
     'primary_library_pool': None,
     'library_placement_rules': [],
+    'zone_mappings': {},
 }
 
 
