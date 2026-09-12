@@ -23,6 +23,8 @@ OPTIONAL_CAPABILITIES = (
     "emby",
     "lyrion",
     "kodi",
+    # Reserved/dormant so RAAT/Roon can be switched on later without redesign.
+    "roon",
 )
 
 # These remain live regardless of the optional UI/discovery selections.
@@ -68,7 +70,7 @@ class DeviceCapabilityProfile:
         configured = path or os.getenv("SURROUNDCORE_DEVICE_PROFILE")
         self.path = Path(configured or "/var/lib/surroundcore/device-capabilities.json")
         self._lock = threading.RLock()
-        self._enabled: Dict[str, bool] = {name: True for name in OPTIONAL_CAPABILITIES}
+        self._enabled: Dict[str, bool] = {name: (name != "roon") for name in OPTIONAL_CAPABILITIES}
         self.load()
 
     def load(self) -> None:
@@ -125,7 +127,8 @@ class DeviceCapabilityProfile:
         return {
             "enabled": snap.enabled,
             "always_on": list(snap.always_on),
-            "optional": list(OPTIONAL_CAPABILITIES),
+            "optional": [name for name in OPTIONAL_CAPABILITIES if name != "roon"],
+            "reserved": ["roon"],
         }
 
 

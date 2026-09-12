@@ -33,6 +33,7 @@ from .db import (init_db, upsert_media, list_media, get_media, upsert_endpoint, 
                  save_source, list_sources, get_source, delete_source, prune_source_media)
 from .groups import GroupPlayback
 from . import sessions
+from .device_capabilities import device_capabilities
 
 app = FastAPI(title='SurroundCore', version='0.5.0-dev')
 
@@ -99,6 +100,10 @@ class StreamingSettingsUpdate(BaseModel):
     allow_downsample: Optional[bool] = None
     allow_downmix: Optional[bool] = None
     providers: Optional[dict] = None
+
+
+class DeviceCapabilitiesUpdate(BaseModel):
+    enabled: dict[str, bool] = Field(default_factory=dict)
 
 
 class RadioStationInput(BaseModel):
@@ -216,6 +221,22 @@ def _all_endpoints():
         except Exception:
             pass
     return list(combined.values())
+
+
+@app.get('/api/v1/device-capabilities')
+def get_device_capabilities(authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    return device_capabilities.as_dict()
+
+
+@app.put('/api/v1/device-capabilities')
+def put_device_capabilities(item: DeviceCapabilitiesUpdate, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    try:
+        device_capabilities.update(item.enabled)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return device_capabilities.as_dict()
 
 
 def _public_url():
