@@ -286,6 +286,22 @@ class PoolCreateRequest(BaseModel):
 class PoolDestroyRequest(BaseModel):
     confirm:str
 
+class PoolMemberReplaceRequest(BaseModel):
+    old_device:str
+    new_device:str
+    confirm:str
+    allow_unhealthy:bool=False
+
+class PoolMemberDetachRequest(BaseModel):
+    device:str
+    confirm:str
+
+class PoolMemberAttachRequest(BaseModel):
+    existing_device:str
+    new_device:str
+    confirm:str
+    allow_unhealthy:bool=False
+
 def _lsblk_disks():
     raw=run(['lsblk','-J','-b','-d','-o','NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,ROTA,FSTYPE,MOUNTPOINTS'])
     return json.loads(raw).get('blockdevices') or []
@@ -397,8 +413,10 @@ def _managed_pool_state():
     try: return json.loads(MANAGED_POOLS.read_text())
     except Exception: return {'pools':{}}
 
-def _save_managed_pool(name,devices):
-    data=_managed_pool_state(); data.setdefault('pools',{})[name]={'devices':list(devices),'created_at':time.time()}
+def _save_managed_pool(name,devices,layout='single',created_at=None):
+    data=_managed_pool_state(); current=(data.setdefault('pools',{}).get(name) or {})
+    data['pools'][name]={'devices':list(devices),'layout':layout,
+                         'created_at':created_at or current.get('created_at') or time.time()}
     tmp=MANAGED_POOLS.with_suffix('.tmp'); tmp.write_text(json.dumps(data,indent=2,sort_keys=True)+'\n'); os.replace(tmp,MANAGED_POOLS)
 
 def _forget_managed_pool(name):
@@ -408,6 +426,36 @@ def _forget_managed_pool(name):
 def _all_zpool_names():
     p=subprocess.run(['zpool','list','-H','-o','name'],capture_output=True,text=True)
     return {x.strip() for x in (p.stdout or '').splitlines() if x.strip()}
+
+def _pool_layout(name,meta):
+    explicit=str(meta.get('layout') or '').lower()
+    if explicit in ('single','jbod','mirror','raidz1','raidz2'): return explicit
+    p=subprocess.run(['zpool','status','-P',name],capture_output=True,text=True)
+    text=(p.stdout or '').lower()
+    if 'raidz2-' in text: return 'raidz2'
+    if 'raidz1-' in text or 'raidz-' in text: return 'raidz1'
+    if 'mirror-' in text: return 'mirror'
+    return 'single' if len(meta.get('devices') or []) <= 1 else 'jbod'
+
+def _pool_members(name,devices):
+    p=subprocess.run(['zpool','status','-P',name],capture_output=True,text=True)
+    lines=(p.stdout or '').splitlines(); out=[]
+    for device in devices:
+        state='UNKNOWN'; reads=writes=cksums=0
+        keys={str(device),os.path.realpath(str(device)),Path(str(device)).name}
+        for line in lines:
+            cols=line.split()
+            if len(cols)<2: continue
+            token=cols[0]
+            if any(k and (token==k or token.endswith('/'+k) or k in token) for k in keys):
+                state=cols[1]
+                if len(cols)>=5:
+                    try: reads,writes,cksums=(int(cols[2]),int(cols[3]),int(cols[4]))
+                    except Exception: pass
+                break
+        out.append({'device':device,'serial':_serial_from_provisioned_path(device),
+                    'state':state,'read_errors':reads,'write_errors':writes,'checksum_errors':cksums})
+    return out
 
 def _pool_rows():
     managed=_managed_pool_state().get('pools',{})
@@ -420,50 +468,121 @@ def _pool_rows():
             if len(cols)>=5: current[cols[0]]=cols[1:5]
     out=[]
     for name,meta in managed.items():
-        cols=current.get(name)
+        cols=current.get(name); devices=meta.get('devices',[]); layout=_pool_layout(name,meta)
         root=str(POOL_ROOT/name); lib=str(Path(root)/'library')
+        base={'name':name,'root':root,'library_path':lib,'devices':devices,'layout':layout,
+              'members':_pool_members(name,devices) if cols else []}
         if cols:
             size,alloc,free,health=cols
-            out.append({'name':name,'size':int(size),'allocated':int(alloc),'free':int(free),'health':health,
-                        'root':root,'library_path':lib,'devices':meta.get('devices',[]),'online':True})
+            out.append(base|{'size':int(size),'allocated':int(alloc),'free':int(free),'health':health,'online':True})
         else:
-            out.append({'name':name,'size':0,'allocated':0,'free':0,'health':'OFFLINE',
-                        'root':root,'library_path':lib,'devices':meta.get('devices',[]),'online':False})
+            out.append(base|{'size':0,'allocated':0,'free':0,'health':'OFFLINE','online':False})
     return out
 
 @app.get('/v1/pools')
 def pools(authorization:str|None=Header(default=None)):
-    auth(authorization); return {'pools':_pool_rows()}
+    auth(authorization); return {'pools':_pool_rows(), 'layouts':{
+        'single':{'label':'Single disk','min_devices':1,'max_devices':1,'redundancy':'none'},
+        'jbod':{'label':'JBOD / Stripe','min_devices':2,'redundancy':'none'},
+        'mirror':{'label':'Mirror','min_devices':2,'redundancy':'mirror'},
+        'raidz1':{'label':'RAIDZ1','min_devices':3,'redundancy':'1 disk'},
+        'raidz2':{'label':'RAIDZ2','min_devices':4,'redundancy':'2 disks'},
+    }}
+
+def _normalise_layout(value):
+    value=str(value or '').strip().lower()
+    aliases={'stripe':'jbod','raidz':'raidz1','z1':'raidz1','z2':'raidz2'}
+    value=aliases.get(value,value)
+    if value not in ('single','jbod','mirror','raidz1','raidz2'):
+        raise HTTPException(400,'layout must be single, jbod, mirror, raidz1 or raidz2')
+    return value
+
+def _layout_vdev(layout,devices):
+    n=len(devices); minimum={'single':1,'jbod':2,'mirror':2,'raidz1':3,'raidz2':4}[layout]
+    if n < minimum or (layout=='single' and n!=1):
+        raise HTTPException(400,f'{layout} requires '+('exactly 1 disk' if layout=='single' else f'at least {minimum} disks'))
+    if layout=='mirror': return ['mirror',*devices]
+    if layout=='raidz1': return ['raidz1',*devices]
+    if layout=='raidz2': return ['raidz2',*devices]
+    return list(devices)
+
+def _validate_new_pool_device(dev,allow_unhealthy=False):
+    row=_disk_row(dev); smart=_smart(dev)
+    if not smart['healthy_for_new_pool'] and not allow_unhealthy:
+        raise HTTPException(409,f'{dev} has SMART warnings; explicit unhealthy-disk override required')
+    if _imported_pool_for(dev): raise HTTPException(409,f'{dev} is already in an imported pool')
+    if _signatures(dev): raise HTTPException(409,f'{dev} still has filesystem/ZFS signatures; wipe it first')
+    return str(dev)
 
 @app.post('/v1/pools')
 def create_pool(item:PoolCreateRequest,authorization:str|None=Header(default=None)):
-    auth(authorization); name=_pool_name(item.name)
-    if item.layout!='mirror' or len(item.devices)!=2:
-        raise HTTPException(400,'first release supports exactly two disks in a ZFS mirror')
-    devices=[]
-    for dev in item.devices:
-        row=_disk_row(dev); smart=_smart(dev)
-        if not smart['healthy_for_new_pool'] and not item.allow_unhealthy:
-            raise HTTPException(409,f'{dev} has SMART warnings; explicit unhealthy-disk override required')
-        if _imported_pool_for(dev): raise HTTPException(409,f'{dev} is already in an imported pool')
-        devices.append(str(dev))
+    auth(authorization); name=_pool_name(item.name); layout=_normalise_layout(item.layout)
+    if len(set(item.devices)) != len(item.devices): raise HTTPException(400,'each disk may only be selected once')
+    devices=[_validate_new_pool_device(dev,item.allow_unhealthy) for dev in item.devices]
+    vdev=_layout_vdev(layout,devices)
     if name in _all_zpool_names(): raise HTTPException(409,'ZFS pool name is already in use')
-    for dev in devices:
-        if _signatures(dev): raise HTTPException(409,f'{dev} still has filesystem/ZFS signatures; wipe it first')
     root=POOL_ROOT/name
-    cmd=['zpool','create','-f','-o','ashift=12',
-         '-O','compression=zstd','-O','atime=off','-O','xattr=sa',
-         '-O','acltype=posixacl','-O',f'mountpoint={root}',name,'mirror',*devices]
-    p=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
+    cmd=['zpool','create','-f','-o','ashift=12','-O','compression=zstd','-O','atime=off',
+         '-O','xattr=sa','-O','acltype=posixacl','-O',f'mountpoint={root}',name,*vdev]
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
     if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool create failed').strip())
-    _save_managed_pool(name,devices)
-    for dataset,props in ((f'{name}/library',['-o','recordsize=1M']),
-                          (f'{name}/staging',['-o','recordsize=1M'])):
+    _save_managed_pool(name,devices,layout)
+    for dataset,props in ((f'{name}/library',['-o','recordsize=1M']),(f'{name}/staging',['-o','recordsize=1M'])):
         q=subprocess.run(['zfs','create',*props,dataset],capture_output=True,text=True)
         if q.returncode:
-            subprocess.run(['zpool','destroy','-f',name],capture_output=True,text=True)
-            _forget_managed_pool(name)
+            subprocess.run(['zpool','destroy','-f',name],capture_output=True,text=True); _forget_managed_pool(name)
             raise HTTPException(502,(q.stderr or q.stdout or 'dataset create failed').strip())
+    return {'ok':True,'pool':next(x for x in _pool_rows() if x['name']==name)}
+
+def _managed_pool(name):
+    name=_pool_name(name); meta=(_managed_pool_state().get('pools') or {}).get(name)
+    if not meta: raise HTTPException(404,'managed pool not found')
+    return name,meta
+
+def _device_serial(device):
+    try: return str(_disk_row(device).get('serial') or _serial_from_provisioned_path(device) or Path(device).name)
+    except Exception: return str(_serial_from_provisioned_path(device) or Path(device).name)
+
+@app.post('/v1/pools/{name}/members/replace')
+def replace_pool_member(name:str,item:PoolMemberReplaceRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); name,meta=_managed_pool(name)
+    if item.old_device not in (meta.get('devices') or []): raise HTTPException(404,'old member is not part of this managed pool')
+    newdev=_validate_new_pool_device(item.new_device,item.allow_unhealthy)
+    expected=f'REPLACE {name} {_device_serial(item.old_device)} WITH {_device_serial(newdev)}'
+    if item.confirm != expected: raise HTTPException(400,f'confirmation must be {expected}')
+    p=subprocess.run(['zpool','replace','-f',name,item.old_device,newdev],capture_output=True,text=True,timeout=120)
+    if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool replace failed').strip())
+    devices=[newdev if x==item.old_device else x for x in meta.get('devices',[])]
+    _save_managed_pool(name,devices,_pool_layout(name,meta),meta.get('created_at'))
+    return {'ok':True,'pool':next(x for x in _pool_rows() if x['name']==name)}
+
+@app.delete('/v1/pools/{name}/members')
+def detach_pool_member(name:str,item:PoolMemberDetachRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); name,meta=_managed_pool(name); devices=list(meta.get('devices') or [])
+    layout=_pool_layout(name,meta)
+    if layout!='mirror': raise HTTPException(409,'individual member detach is only supported for mirror pools')
+    if item.device not in devices: raise HTTPException(404,'member is not part of this managed pool')
+    if len(devices)<2: raise HTTPException(409,'cannot detach the only pool member')
+    expected=f'DETACH {name} {_device_serial(item.device)}'
+    if item.confirm != expected: raise HTTPException(400,f'confirmation must be {expected}')
+    p=subprocess.run(['zpool','detach',name,item.device],capture_output=True,text=True,timeout=120)
+    if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool detach failed').strip())
+    devices=[x for x in devices if x!=item.device]
+    _save_managed_pool(name,devices,'single' if len(devices)==1 else 'mirror',meta.get('created_at'))
+    return {'ok':True,'pool':next(x for x in _pool_rows() if x['name']==name)}
+
+@app.post('/v1/pools/{name}/members/attach')
+def attach_pool_member(name:str,item:PoolMemberAttachRequest,authorization:str|None=Header(default=None)):
+    auth(authorization); name,meta=_managed_pool(name); devices=list(meta.get('devices') or [])
+    if _pool_layout(name,meta)!='single' or len(devices)!=1:
+        raise HTTPException(409,'attach/rebuild mirror is only available for a single-disk pool')
+    if item.existing_device not in devices: raise HTTPException(404,'existing member is not part of this pool')
+    newdev=_validate_new_pool_device(item.new_device,item.allow_unhealthy)
+    expected=f'ATTACH {name} {_device_serial(newdev)}'
+    if item.confirm != expected: raise HTTPException(400,f'confirmation must be {expected}')
+    p=subprocess.run(['zpool','attach','-f',name,item.existing_device,newdev],capture_output=True,text=True,timeout=120)
+    if p.returncode: raise HTTPException(502,(p.stderr or p.stdout or 'zpool attach failed').strip())
+    devices.append(newdev); _save_managed_pool(name,devices,'mirror',meta.get('created_at'))
     return {'ok':True,'pool':next(x for x in _pool_rows() if x['name']==name)}
 
 @app.delete('/v1/pools/{name}')

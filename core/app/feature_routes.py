@@ -1,3 +1,4 @@
+import urllib.parse
 import hashlib, hmac, os
 import httpx
 from fastapi import APIRouter, Header, HTTPException
@@ -189,6 +190,22 @@ def core_node_storage_pool_destroy(node_id:str,name:str,payload:dict,authorizati
     return _node('DELETE',f'/v1/nodes/{node_id}/storage/pools/{name}',payload)
 
 
+@router.post('/core-systems/nodes/{node_id}/storage/pools/{name}/members/replace')
+def core_node_storage_pool_replace(node_id:str,name:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST',f'/v1/nodes/{node_id}/storage/pools/{name}/members/replace',payload)
+
+@router.delete('/core-systems/nodes/{node_id}/storage/pools/{name}/members')
+def core_node_storage_pool_detach(node_id:str,name:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('DELETE',f'/v1/nodes/{node_id}/storage/pools/{name}/members',payload)
+
+@router.post('/core-systems/nodes/{node_id}/storage/pools/{name}/members/attach')
+def core_node_storage_pool_attach(node_id:str,name:str,payload:dict,authorization:str|None=Header(default=None)):
+    _admin(authorization)
+    return _node('POST',f'/v1/nodes/{node_id}/storage/pools/{name}/members/attach',payload)
+
+
 @router.post('/core-systems/nodes/{node_id}/storage/use-primary-library')
 def core_node_use_primary_library(node_id:str,payload:dict|None=None,authorization:str|None=Header(default=None)):
     _admin(authorization)
@@ -203,7 +220,7 @@ def core_node_use_primary_library(node_id:str,payload:dict|None=None,authorizati
     callback=str(node.get('callback_url') or '')
     host=urllib.parse.urlsplit(callback).hostname
     if not host: raise HTTPException(409,'Storage node has no reachable address')
-    mount_payload={'kind':'nfs','host':host,'share':'/library','name':node.get('name') or chosen.get('name') or 'Extended Storage','use':'library','writable':True}
+    mount_payload={'kind':'nfs','host':host,'share':'/','name':node.get('name') or chosen.get('name') or 'Extended Storage','use':'library','writable':True}
     mounted=_storage('POST','/v1/network/connect',mount_payload)
     mounted=_register_library_target(mounted,mount_payload)
     from .db import save_source,list_sources
