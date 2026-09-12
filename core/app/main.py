@@ -343,6 +343,24 @@ async def replication_apply(request: Request, authorization: str | None = Header
         raise HTTPException(400, str(exc))
 
 
+@app.get('/storage-appliance/{node_id}', response_class=HTMLResponse)
+def storage_appliance_page(node_id: str):
+    node_url=os.getenv('SURROUNDCORE_NODE_URL','http://127.0.0.1:8094').rstrip('/')
+    node_token=os.getenv('SURROUNDCORE_NODE_TOKEN','')
+    if not node_token:
+        return HTMLResponse('<h2>Storage appliance service is not configured.</h2>',status_code=503)
+    try:
+        with httpx.Client(timeout=20) as client:
+            r=client.get(node_url+'/v1/nodes/'+urllib.parse.quote(node_id,safe='')+'/storage/ui-template',headers={'Authorization':'Bearer '+node_token})
+        if r.status_code>=400:
+            return HTMLResponse('<h2>Storage appliance unavailable.</h2><p>'+str(r.text)[:500]+'</p>',status_code=r.status_code)
+        template=(r.json() or {}).get('html') or ''
+    except Exception as exc:
+        return HTMLResponse('<h2>Storage appliance unavailable.</h2><p>'+str(exc)[:500]+'</p>',status_code=502)
+    api_base='/api/v1/core-systems/nodes/'+urllib.parse.quote(node_id,safe='')+'/storage'
+    page=template.replace('__SC_API_BASE__',api_base).replace('__SC_MODE__','core').replace('__SC_CAN_ASSIGN__','true')
+    return HTMLResponse(page)
+
 @app.get('/', response_class=HTMLResponse)
 def web_dashboard():
     return HTMLResponse(streaming_setup_html())

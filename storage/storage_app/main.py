@@ -1,6 +1,7 @@
 import json, os, re, shutil, subprocess, tempfile, uuid, time, threading
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 app=FastAPI(title='SurroundCore Storage',version='0.2')
@@ -12,6 +13,20 @@ RCLONE=DATA/'rclone.conf'
 STATE=DATA/'targets.json'
 MANAGED_POOLS=DATA/'managed-pools.json'
 for p in (DATA,SOURCES,BACKUPS): p.mkdir(parents=True,exist_ok=True)
+UI_TEMPLATE=Path(__file__).with_name('storage_ui.html')
+
+def _ui_template():
+    return UI_TEMPLATE.read_text(encoding='utf-8')
+
+def _ui_page(api_base='/v1',mode='local',can_assign=False):
+    return (_ui_template().replace('__SC_API_BASE__',api_base)
+            .replace('__SC_MODE__',mode)
+            .replace('__SC_CAN_ASSIGN__','true' if can_assign else 'false'))
+
+@app.get('/',response_class=HTMLResponse)
+def storage_ui_root():
+    return HTMLResponse(_ui_page('/v1','local',False))
+
 
 RAW_ALLOWED_DEVICES={x.strip() for x in os.getenv('SURROUNDCORE_STORAGE_ALLOWED_DEVICES','').split(',') if x.strip()}
 RAW_ALLOWED_SERIALS={x.strip() for x in os.getenv('SURROUNDCORE_STORAGE_ALLOWED_SERIALS','').split(',') if x.strip()}
@@ -268,6 +283,10 @@ def rclone_remotes(authorization:str|None=Header(default=None)):
     try: names=[x.rstrip(':') for x in run(['rclone','listremotes','--config',str(RCLONE)]).splitlines() if x.strip()]
     except Exception as exc: raise HTTPException(502,str(exc))
     return {'remotes':names,'advanced':True}
+
+@app.get('/v1/ui/template')
+def storage_ui_template(authorization:str|None=Header(default=None)):
+    auth(authorization); return {'html':_ui_template(),'owner':'surround-storage','version':'0.2'}
 
 @app.get('/v1/health')
 def health(): return {'ok':True,'service':'SurroundCore Storage','version':'0.2'}
