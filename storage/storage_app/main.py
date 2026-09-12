@@ -1,4 +1,4 @@
-import json, os, re, shutil, subprocess, tempfile, uuid, time
+import json, os, re, shutil, subprocess, tempfile, uuid, time, threading
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -139,6 +139,37 @@ def permanent_mount(source,path,kind,options=None):
     cmd += [source,str(path)]
     run(cmd,timeout=20); return str(path)
 
+
+def _managed_nfs_targets():
+    data=load_state(); out=[]
+    for bucket in ('library','backup'):
+        for item in (data.get(bucket) or {}).values():
+            if item.get('kind') != 'nfs': continue
+            if not str(item.get('id') or '').startswith('SurroundCore-Storage-'): continue
+            out.append(item)
+    return out
+
+def _restore_managed_nfs():
+    pending=_managed_nfs_targets()
+    for _ in range(45):
+        left=[]
+        for item in pending:
+            path=Path(item.get('path') or '')
+            if path and subprocess.run(['mountpoint','-q',str(path)]).returncode == 0:
+                continue
+            host=item.get('host'); share=item.get('share') or '/'
+            if not host or not path: continue
+            source=f'{host}:{share}'
+            opts='rw,nosuid,nodev,noexec,vers=4.1,proto=tcp'
+            try: permanent_mount(source,path,'nfs',opts)
+            except Exception: left.append(item)
+        if not left: return
+        pending=left; time.sleep(2)
+
+@app.on_event('startup')
+def _startup_restore_managed_nfs():
+    threading.Thread(target=_restore_managed_nfs,daemon=True,name='storage-remount').start()
+
 @app.post('/v1/usb/connect')
 def usb_connect(item:UsbRequest,authorization:str|None=Header(default=None)):
     auth(authorization); dev=Path(item.device)
@@ -164,12 +195,12 @@ def network_connect(item:NetworkRequest,authorization:str|None=Header(default=No
             os.chmod(cf,0o600); opts=f'credentials={cf},iocharset=utf8,vers=3.0'
         else: opts='guest,iocharset=utf8,vers=3.0'
     else:
-        source=f'{item.host}:{item.share}'; opts=('rw' if item.writable else 'ro')+',nosuid,nodev,vers=4'
+        source=f'{item.host}:{item.share}'; opts=('rw' if item.writable else 'ro')+',nosuid,nodev,noexec,vers=4.1,proto=tcp'
     try: sample=temp_mount(source,item.kind,opts)
     except Exception as exc: raise HTTPException(502,f'Connection test failed: {exc}')
     try: permanent_mount(source,path,item.kind,opts)
     except Exception as exc: raise HTTPException(502,f'Mount failed: {exc}')
-    return register_target(item.use,key,{'id':key,'name':item.name or item.share,'kind':item.kind,'path':str(path),'host':item.host,'share':item.share,'sample':sample})
+    return register_target(item.use,key,{'id':key,'name':item.name or item.share,'kind':item.kind,'path':str(path),'host':item.host,'share':item.share,'sample':sample,'writable':bool(item.writable)})
 
 @app.get('/v1/cloud/providers')
 def cloud_providers(authorization:str|None=Header(default=None)):
