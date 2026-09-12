@@ -14,6 +14,7 @@ PROTOCOLS = {
     'sonos': Protocol('sonos','Sonos',10,'native','network',('play','pause','resume','stop','seek','volume','mute','status')),
     'airplay': Protocol('airplay','AirPlay',20,'native','network',('play','pause','resume','stop','seek','status')),
     'cast': Protocol('cast','Chromecast / Google Cast',30,'native','network',('play','pause','resume','stop','seek','volume','mute','status')),
+    'oaat': Protocol('oaat','OAAT',35,'native','network',('play','stop','status'),'Open Advanced Audio Transport'),
     'upnp': Protocol('upnp','UPnP / DLNA / OpenHome',40,'native','network',('play','pause','resume','stop','seek','volume','mute','status')),
     'squeezebox': Protocol('squeezebox','Squeezebox / LMS',50,'bridge','network',('play','pause','resume','stop','seek','volume','mute','status')),
     'meridian': Protocol('meridian','Meridian / Sooloos',60,'native','network',('wake','play','pause','resume','stop','seek','volume','mute','status'),'SpeakerLink wake uses source 2'),

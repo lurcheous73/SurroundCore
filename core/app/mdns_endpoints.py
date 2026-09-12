@@ -7,6 +7,7 @@ SERVICE_KINDS = {
     '_googlecast._tcp.local.': 'cast',
     '_raop._tcp.local.': 'airplay',
     '_airplay._tcp.local.': 'airplay',
+    '_oaat._tcp.local.': 'oaat',
 }
 
 
@@ -20,6 +21,37 @@ def _normalise_airplay_id(name, props):
     if len(raw) == 12:
         return ':'.join(raw[i:i+2] for i in range(0, 12, 2)).upper()
     return deviceid or name
+
+
+def _oaat_caps(props, port):
+    raw_caps = str(props.get('caps') or '')
+    pcm_rate = pcm_bits = None
+    flac = False
+    for part in (x.strip() for x in raw_caps.split(',') if x.strip()):
+        if part.startswith('pcm:'):
+            try:
+                rate_khz, bits = part.split(':', 1)[1].split('/', 1)
+                pcm_rate = int(float(rate_khz) * 1000)
+                pcm_bits = int(bits)
+            except (TypeError, ValueError):
+                pass
+        elif part == 'flac':
+            flac = True
+    return {
+        'service_type': '_oaat._tcp.local.',
+        'protocol': 'oaat',
+        'protocol_version': props.get('v'),
+        'endpoint_id': props.get('id'),
+        'vendor': props.get('vendor'),
+        'firmware': props.get('fw'),
+        'volume_control': props.get('vol'),
+        'control_port': port,
+        'pcm_max_rate': pcm_rate,
+        'pcm_max_bits': pcm_bits,
+        'flac': flac,
+        'txt': dict(props),
+        'discovered_only': False,
+    }
 
 
 def _display_name(name, props):
@@ -57,7 +89,7 @@ class _Listener(ServiceListener):
             k = key.decode('utf-8', 'replace') if isinstance(key, bytes) else str(key)
             v = value.decode('utf-8', 'replace') if isinstance(value, bytes) else str(value)
             props[k] = v
-        display = _display_name(name, props)
+        display = props.get('name') or _display_name(name, props)
         endpoint_id = _normalise_airplay_id(name, props) if self.kind == 'airplay' else (props.get('id') or name)
         capabilities = {
             'service_type': self.service_type,
@@ -65,7 +97,18 @@ class _Listener(ServiceListener):
             'txt': props,
             'render_multichannel_to_stereo': True,
         }
-        if self.kind == 'airplay':
+        channels = 2
+        channel_map = ['FL', 'FR']
+        if self.kind == 'oaat':
+            try:
+                channels = max(1, min(int(props.get('ch') or 2), 32))
+            except (TypeError, ValueError):
+                channels = 2
+            standard = ['FL','FR','FC','LFE','SL','SR','BL','BR']
+            channel_map = standard[:channels] if channels <= len(standard) else standard + [f'CH{i+1}' for i in range(len(standard), channels)]
+            capabilities = _oaat_caps(props, info.port)
+            capabilities['address'] = addresses[0] if addresses else None
+        elif self.kind == 'airplay':
             capabilities.update({
                 'airplay2_native_realtime': True,
                 'timing': 'ptp',
@@ -76,8 +119,8 @@ class _Listener(ServiceListener):
             id=f'{self.kind}:{endpoint_id}',
             name=display,
             kind=self.kind,
-            channels=2,
-            channel_map=['LF', 'RF'],
+            channels=channels,
+            channel_map=channel_map,
             address=addresses[0] if addresses else None,
             capabilities=capabilities,
         ).dict()
